@@ -62,6 +62,10 @@
           self.fetch_upstream_skeleton = this.checked;
         });
 
+        $('#fetch_downstream_skeleton' + self.widgetID).change(function() {
+          self.fetch_downstream_skeleton = this.checked;
+        });
+
       }
 
     };
@@ -74,6 +78,21 @@
     console.log('fetch downstream?', this.fetch_downstream_skeletons);
     console.log('current project id', project.id);
     console.log('skeleton id selected?', SkeletonAnnotations.getActiveSkeletonId() );
+
+    // test request to backend of circuitmap app
+    var query_data = {
+      'x': stackViewer.x,
+      'y':  stackViewer.y,
+      'z':  stackViewer.z,
+      'fetch_upstream': this.fetch_upstream_skeletons,
+      'fetch_downstream': this.fetch_downstream_skeletons,
+      'active_skeleton': SkeletonAnnotations.getActiveSkeletonId()
+    };
+    CATMAID.fetch('ext/circuitmap/' + project.id + '/segment/lookup', 'POST', query_data)
+      .then(function(e) {
+        console.log(e);
+    });
+
     /*$.ajax({
       'url': 'https://cloud.braincircuits.io/api/v1/segment/lookup/' + activeStackViewer.x + '/' + activeStackViewer.y + '/' + activeStackViewer.z,
       'type': 'GET'
