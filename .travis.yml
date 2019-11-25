@@ -1,0 +1,54 @@
+dist: xenial
+sudo: required
+notifications:
+  email: false
+language: python
+cache: pip
+python:
+  - "3.5"
+  - "3.6"
+  - "3.7"
+  
+env:
+  - CATMAID_DIR=$TRAVIS_BUILD_DIR/travis/CATMAID CATMAID_BRANCH=master
+  - CATMAID_DIR=$TRAVIS_BUILD_DIR/travis/CATMAID CATMAID_BRANCH=dev
+matrix:
+  fast_finish: true
+  allow_failures:
+  - env: CATMAID_DIR=$TRAVIS_BUILD_DIR/travis/CATMAID CATMAID_BRANCH=dev
+services:
+  - postgresql
+addons:
+  postgresql: 10  # will be replaced by v10, travis doesn't have it yet
+before_install:
+  # setup CATMAID
+  - git clone -b $CATMAID_BRANCH https://github.com/catmaid/CATMAID.git $CATMAID_DIR
+  - cd $CATMAID_DIR
+  # CATMAID before_install
+  - mkdir tmp
+  - travis_retry sudo apt-get update -qq
+  - ./scripts/travis/install_postgres.sh
+  - ./scripts/travis/install_python.sh
+  - nvm install 11
+  # CATMAID install:
+  - ./scripts/travis/install_requirements.sh
+  - pip install coveralls flake8
+  - npm install
+  # CATMAID before_script:
+  # Set up and start postgres, create database, write config files
+  - ./scripts/travis/setup_database.sh
+  - ./scripts/travis/configure_catmaid.sh
+install:
+  - export PATH=$(npm bin):$PATH
+  - pip install $TRAVIS_BUILD_DIR
+  - cd $CATMAID_DIR/django/projects
+  - python manage.py migrate --noinput
+  - python manage.py collectstatic --link --noinput
+script:
+  - coverage run --source=circuitmap manage.py test circuitmap.tests
+  - cd $TRAVIS_BUILD_DIR
+  - if [ -x "$(command -v mypy)" ]; then mypy --config-file mypy.ini ./ || true; fi
+  - flake8 --config .travis.flake8 --exclude=$CATMAID_DIR .
+  - jshint --config .travis.jshintrc --exclude=$CATMAID_DIR .
+after_success:
+  - cd django/projects && coveralls

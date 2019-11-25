@@ -1,0 +1,3 @@
+include README.md
+recursive-include circuitmap/static *
+recursive-include circuitmap/fixtures *
