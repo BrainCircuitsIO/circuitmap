@@ -2,12 +2,25 @@
 """Methods called by API endpoints"""
 from rest_framework.decorators import api_view
 from django.http import HttpRequest, JsonResponse
+from django.db import connection
+
+import numpy as np
+import pandas as pd
+import scipy.spatial as sp
+import fafbseg
+
+from .remote import cur
 
 from cloudvolume import CloudVolume
 from cloudvolume.datasource.precomputed.skeleton.sharded import ShardedPrecomputedSkeletonSource
 
+from celery.task import task
+
 CLOUDVOLUME_URL = 'precomputed://gs://fafb-ffn1-20190805/segmentation/'
 CLOUDVOLUME_SKELETONS = 'skeletons_32nm_nothresh'
+GOOGLE_SEGMENTATION_STORAGE = "https://storage.googleapis.com/fafb-ffn1-20190805/segmentation"
+DEFAULT_IMPORT_USER = 1
+CONNECTORID_OFFSET = 13143730071000001
 
 cv = CloudVolume(CLOUDVOLUME_URL, use_https=True)
 cv.meta.info['skeletons'] = CLOUDVOLUME_SKELETONS
@@ -23,14 +36,187 @@ def is_installed(request, project_id=None):
 def index(request, project_id=None):
     return JsonResponse({'test': 'test message'})
 
-@api_view(['POST'])
-def segment_lookup(request: HttpRequest, project_id=None):
-	x = int(request.POST.get('x', None))
-	y = int(request.POST.get('y', None))
-	z = int(request.POST.get('z', None))
-	try:
-		segment_id = cv[x//2,y//2,z,0][0][0][0][0]
-	except:
-		segment_id = None
+@task()
+def import_synapses_manual_skeleton(project_id, fetch_upstream, fetch_downstream, distance_threshold, active_skeleton_id, xres, yres, zres):
+    print('task: import_synapses_manual_skeleton')
 
-	return JsonResponse({'project_id': project_id, 'segment_id': str(segment_id)})
+    x_res, y_res, z_res = 4, 4, 40
+
+    # retrieve skeleton with all nodes directly from the database
+    print('retrieve skeletons')
+
+    cursor = connection.cursor()
+
+    # Select all nodes and their tags
+    cursor.execute('''
+        SELECT t.id, t.parent_id, t.location_x, t.location_y, t.location_z
+        FROM treenode t
+        WHERE t.skeleton_id = %s AND t.project_id = %s
+        ''', (int(active_skeleton_id), int(project_id)))
+
+    skeleton = pd.DataFrame.from_records(cursor.fetchall(), columns=['id', 'parent_id', 'x', 'y', 'z'])
+
+
+    # Accessing the most recent autoseg data
+    fafbseg.use_google_storage(GOOGLE_SEGMENTATION_STORAGE)
+
+    # Retrieve segment ids
+    segment_ids = fafbseg.segmentation.get_seg_ids(skeleton[['x','y','z']])
+
+    print('segment_ids', segment_ids)
+
+    overlapping_segmentids = set()
+    for seglist in segment_ids:
+        for s in seglist:
+            overlapping_segmentids.add(s)
+        
+    tree = sp.KDTree( skeleton[['x', 'y', 'z']] )
+
+    connectors = {}
+    treenode_connector = {}
+    all_pre_links = []
+    all_post_links = []
+
+    def get_links(segment_id, where='segmentid_x', table='synlinks_v2'):
+        cols = ['ids', 'pre_x', 'pre_y', 'pre_z', 'post_x', 'post_y', 
+                'post_z', 'scores', 'segmentid_x', 'segmentid_y', 'max', 'index']
+        cur.execute('SELECT * from {} where {} = {};'.format(table, where, segment_id))
+        pre_links = cur.fetchall()
+        return pd.DataFrame.from_records(pre_links, columns=cols)
+
+    for segment_id  in list(overlapping_segmentids):
+        print('process', segment_id)
+        all_pre_links.append(get_links(segment_id, 'segmentid_x'))
+        all_post_links.append(get_links(segment_id, 'segmentid_y'))
+        
+    all_pre_links_concat = pd.concat(all_pre_links)
+    all_post_links_concat = pd.concat(all_post_links)
+
+    print('total nr prelinks collected', len(all_pre_links_concat))
+    print('total nr postlinks collected', len(all_post_links_concat))
+
+    if len(all_pre_links_concat) > 0:
+        print('find closest distances to skeleton for pre')
+        res = tree.query(all_pre_links_concat[['pre_x','pre_y', 'pre_z']] * np.array([xres,yres,zres]))
+        all_pre_links_concat['dist'] = res[0]
+        all_pre_links_concat['skeleton_node_id_index'] = res[1]
+        for idx, r in all_pre_links_concat.iterrows():
+            if r['dist'] > distance_threshold:
+                continue
+            # add connector if it does not exist
+            connector_id = CONNECTORID_OFFSET + int(r['index']) * 10 
+
+            if not connector_id in connectors:
+                connectors[connector_id] = r.to_dict()
+            # add treenode_connector link
+            treenode_connector[( int(skeleton.loc[r['skeleton_node_id_index']]['id']), connector_id)] = {'type': 'presynaptic_to'}
+
+    if len(all_post_links_concat) > 0:
+
+        print('find closest distances to skeleton for post')
+        res = tree.query(all_post_links_concat[['post_x','post_y', 'post_z']] * np.array([xres,yres,zres]))
+        all_post_links_concat['dist'] = res[0]
+        all_post_links_concat['skeleton_node_id_index'] = res[1]
+            
+        for idx, r in all_post_links_concat.iterrows():
+            if r['dist'] > distance_threshold:
+                continue
+                
+            connector_id = CONNECTORID_OFFSET + int(r['index']) * 10 
+            if not connector_id in connectors:
+                connectors[connector_id] = r.to_dict()
+            # add treenode_connector link
+            treenode_connector[( int(skeleton.loc[r['skeleton_node_id_index']]['id']), connector_id)] = {'type': 'postsynaptic_to'}
+
+    # insert into database
+    print('fetch relations')
+    cursor.execute("SELECT id,relation_name from relation where project_id = {project_id};".format(project_id=project_id))
+    res = cursor.fetchall()
+    relations = dict([(v,u) for u,v in res])
+
+    # insert connectors
+    print('insert connectors')
+    for connector_id, r in connectors.items():
+        q = """
+            INSERT INTO connector (id, user_id, editor_id, project_id, location_x, location_y, location_z)
+                        VALUES ({},{},{},{},{},{},{});
+            """.format(
+            connector_id,
+            DEFAULT_IMPORT_USER,
+            DEFAULT_IMPORT_USER,
+            project_id,
+            int(r['pre_x'] * xres), 
+            int(r['pre_y'] * yres),
+            int( (r['pre_z']+1) * zres) # TODO: offset by 1 due to preprocessing by J&J 
+            )
+
+        print(q)
+        cursor.execute(q)
+
+    # insert links
+    # TODO: optimize based on scores
+    confidence_value = 5
+
+    print('insert links', treenode_connector)
+    for idx, val in treenode_connector.items():
+        print('idx', idx)
+        skeleton_node_id, connector_id = idx
+        q = """
+            INSERT INTO treenode_connector (user_id, project_id, 
+            treenode_id,
+            connector_id,
+            relation_id, 
+            skeleton_id,
+            confidence)
+                        VALUES ({},{},{},{},{},{},{});
+            """.format(
+            DEFAULT_IMPORT_USER,
+            project_id,
+            skeleton_node_id,
+            connector_id,
+            relations[val['type']],
+            active_skeleton_id,
+            confidence_value)
+
+        print(q)
+        cursor.execute(q)
+
+    print('done')
+
+
+@api_view(['POST'])
+def fetch_synapses(request: HttpRequest, project_id=None):
+
+    # TODO: issue with coordinate are float
+    x = int(request.POST.get('x', None))
+    y = int(request.POST.get('y', None))
+    z = int(request.POST.get('z', None))
+
+    xres = int(request.POST.get('xres', 1))
+    yres = int(request.POST.get('yres', 1))
+    zres = int(request.POST.get('zres', 1))
+
+    fetch_upstream = bool(request.POST.get('fetch_upstream', False ))
+    fetch_downstream = bool(request.POST.get('fetch_downstream', False ))
+    distance_threshold = int(request.POST.get('distance_threshold', 1000 ))
+    active_skeleton_id = int(request.POST.get('active_skeleton', -1 ))
+
+    if active_skeleton_id == -1:
+        # look up segment id at location
+        try:
+            segment_id = cv[x//2,y//2,z,0][0][0][0][0]
+        except:
+            segment_id = None
+
+        # TODO: ingest autoseg skeleton, then user can call function later to populate
+
+        return JsonResponse({'project_id': project_id, 'segment_id': str(segment_id)})
+
+    else:
+        task = import_synapses_manual_skeleton.delay(project_id, 
+            fetch_upstream, fetch_downstream, distance_threshold, 
+            active_skeleton_id,
+            xres, yres, zres)
+        return JsonResponse({'project_id': project_id})
+
+    

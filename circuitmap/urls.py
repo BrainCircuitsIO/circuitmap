@@ -10,5 +10,5 @@ app_name = 'circuitmap'
 urlpatterns = [
     url(r'^is-installed$', circuitmap.control.is_installed),
     url(r'^index$', circuitmap.control.index),
-    url(r'^(?P<project_id>\d+)/segment/lookup$', circuitmap.control.segment_lookup),
+    url(r'^(?P<project_id>\d+)/synapses/fetch$', circuitmap.control.fetch_synapses),
 ]

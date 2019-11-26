@@ -11,6 +11,7 @@
 
     this.fetch_upstream_skeletons = false;
     this.fetch_downstream_skeletons = false;
+    this.distance_threshold = 1000;
   };
 
   $.extend(CircuitmapWidget.prototype, new InstanceRegistry());
@@ -32,12 +33,17 @@
           <tr>
             <td><input type="checkbox" name="fetch_upstream_skeletons"
                     id="fetch_upstream_skeletons${this.widgetID}" tabindex="-1" /></td>
-            <td>Fetch upstream skeletons</td>
+            <td>Fetch upstream autoseg skeletons</td>
           </tr>
           <tr>
             <td><input type="checkbox" name="fetch_downstream_skeletons"
                     id="fetch_downstream_skeletons${this.widgetID}" tabindex="-1" /></td>
-            <td>Fetch downstream skeletons</td>
+            <td>Fetch downstream autoseg skeletons</td>
+          </tr>
+          <tr>
+            <td><input type="number" name="distance_threshold" value="1000"
+                    id="distance_threshold${this.widgetID}" tabindex="-1" /></td>
+            <td>Cut-off distance-from-skeleton threshold (in nm) to retrieve synaptic links</td>
           </tr>
         </table>
         `;
@@ -66,6 +72,10 @@
           self.fetch_downstream_skeleton = this.checked;
         });
 
+        $('#distance_threshold' + self.widgetID).change(function() {
+          self.distance_threshold = this.value;
+        });
+
       }
 
     };
@@ -73,30 +83,26 @@
 
   CircuitmapWidget.prototype.fetch = function() {
     var stackViewer = project.focusedStackViewer;
-    console.log('coordinates are ...', stackViewer.x, stackViewer.y, stackViewer.z);
-    console.log('fetch upstream?', this.fetch_upstream_skeletons);
-    console.log('fetch downstream?', this.fetch_downstream_skeletons);
-    console.log('current project id', project.id);
-    console.log('skeleton id selected?', SkeletonAnnotations.getActiveSkeletonId() );
+    var stack = project.focusedStackViewer.primaryStack;
 
-    // test request to backend of circuitmap app
     var query_data = {
       'x': stackViewer.x,
       'y':  stackViewer.y,
       'z':  stackViewer.z,
+      'xres': stack.resolution.x,
+      'yres': stack.resolution.y,
+      'zres': stack.resolution.z,
       'fetch_upstream': this.fetch_upstream_skeletons,
       'fetch_downstream': this.fetch_downstream_skeletons,
+      'distance_threshold': this.distance_threshold,
       'active_skeleton': SkeletonAnnotations.getActiveSkeletonId()
     };
-    CATMAID.fetch('ext/circuitmap/' + project.id + '/segment/lookup', 'POST', query_data)
+
+    CATMAID.fetch('ext/circuitmap/' + project.id + '/synapses/fetch', 'POST', query_data)
       .then(function(e) {
         console.log(e);
     });
 
-    /*$.ajax({
-      'url': 'https://cloud.braincircuits.io/api/v1/segment/lookup/' + activeStackViewer.x + '/' + activeStackViewer.y + '/' + activeStackViewer.z,
-      'type': 'GET'
-    });*/
   };
 
   CircuitmapWidget.prototype.destroy = function() {
