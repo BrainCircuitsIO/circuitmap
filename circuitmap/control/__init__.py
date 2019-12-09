@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import scipy.spatial as sp
 import fafbseg
+import networkx as nx
 
 from cloudvolume import CloudVolume
 from cloudvolume.datasource.precomputed.skeleton.sharded import ShardedPrecomputedSkeletonSource
@@ -46,6 +47,8 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
     nr_of_vertices = len(s1.vertices)
     if DEBUG: print('autoseg skeleton for {} has {} nodes'.format(segment_id,
      nr_of_vertices))
+    
+    if DEBUG: print('generate graph for skeleton')
     g=nx.Graph()
     attrs = []
     for idx in range(nr_of_vertices):
@@ -60,7 +63,8 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
 
     # TODO: check if it skeleton already imported
     # this check depends on the chosen implementation
-    nr_components = number_connected_components(g)
+    if DEBUG: print('check number of connected components')
+    nr_components = nx.number_connected_components(g)
     if nr_components > 1:
         if DEBUG: print('more than one component in skeleton graph. use only largest component')
         graph = max(nx.connected_component_subgraphs(g), key=len)
@@ -158,6 +162,8 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
             cursor.execute(query)
 
     cursor.execute('COMMIT;')
+
+    # TODO: call import_synapses_manual_skeleton with autoseg skeleton as seed
 
     if DEBUG: print('task: import_autoseg_skeleton_with_synapses done')
 
