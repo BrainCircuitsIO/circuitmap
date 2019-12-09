@@ -39,6 +39,7 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
     segment_id, xres, yres, zres):
     
     if DEBUG: print('task: import_autoseg_skeleton_with_synapses started')
+    cursor = connection.cursor()
 
     # fetch and insert autoseg skeleton at location
     if DEBUG: print('fetch skeleton for segment_id {}'.format(segment_id))
@@ -91,34 +92,27 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
     INSERT INTO class_instance (user_id, project_id, class_id, name)
                 VALUES ({},{},{},'{}') RETURNING id;
     """.format(DEFAULT_IMPORT_USER, project_id, classes['neuron'] ,"neuron {}".format(segment_id))
-    if DEBUG:
-        print(query)
-    else:
-        cursor.execute(query)
-        neuron_class_instance_id = cursor.fetchone()[0]
-    
+    if DEBUG: print(query)
+    cursor.execute(query)
+    neuron_class_instance_id = cursor.fetchone()[0]
     if DEBUG: print('got neuron', neuron_class_instance_id)
 
     query = """
     INSERT INTO class_instance (user_id, project_id, class_id, name)
                 VALUES ({},{},{},'{}') RETURNING id;
     """.format(DEFAULT_IMPORT_USER, project_id, classes['skeleton'] ,"skeleton {}".format(segment_id))
-    if DEBUG:
-        print(query)
-    else:
-        cursor.execute(query)
-        skeleton_class_instance_id = cursor.fetchone()[0]
+    if DEBUG: print(query)
+    cursor.execute(query)
+    skeleton_class_instance_id = cursor.fetchone()[0]
     if DEBUG: print('got skeleton', skeleton_class_instance_id)
 
     query = """
     INSERT INTO class_instance_class_instance (user_id, project_id, class_instance_a, class_instance_b, relation_id)
                 VALUES ({},{},{},{},{}) RETURNING id;
     """.format(DEFAULT_IMPORT_USER, project_id, skeleton_class_instance_id, neuron_class_instance_id, relations['model_of'])
-    if DEBUG:
-        print(query)
-    else:
-        cursor.execute(query)
-        cici_id = cursor.fetchone()[0]
+    if DEBUG: print(query)
+    cursor.execute(query)
+    cici_id = cursor.fetchone()[0]
 
     # insert treenodes
 
@@ -126,7 +120,7 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
     parent_id = ""
     n = g.node[root_skeleton_id]
     query = """INSERT INTO treenode (project_id, location_x, location_y, location_z, editor_id,
-                user_id, skeleton_id, radius) VALUES ({},{},{},{},{},{},{},{},{});
+                user_id, skeleton_id, radius) VALUES ({},{},{},{},{},{},{},{});
         """.format(
          project_id,
          n['x'],
@@ -136,16 +130,14 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
          DEFAULT_IMPORT_USER,
          skeleton_class_instance_id,
          n['r'])
-    if DEBUG:
-        print(query)
-    else:
-        cursor.execute(query)
+    if DEBUG: print(query)
+    cursor.execute(query)
 
     # insert all chidren
     for parent_id, skeleton_node_id in new_tree.edges(data=False):
         n = g.node[skeleton_node_id]
         query = """INSERT INTO treenode (project_id, location_x, location_y, location_z, editor_id,
-                    user_id, skeleton_id, radius, parent_id) VALUES ({},{},{},{},{},{},{},{},{},{});
+                    user_id, skeleton_id, radius, parent_id) VALUES ({},{},{},{},{},{},{},{},{});
             """.format(
              project_id,
              n['x'],
@@ -156,10 +148,8 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
              skeleton_class_instance_id,
              n['r'],
             parent_id)
-        if DEBUG:
-            print(query)
-        else:
-            cursor.execute(query)
+        if DEBUG: print(query)
+        cursor.execute(query)
 
     cursor.execute('COMMIT;')
 
