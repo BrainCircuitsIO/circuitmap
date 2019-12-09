@@ -72,10 +72,16 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
     else:
         graph = g
 
-    # TODO: depending on the implementation, choose a more sensible
-    # root node
-    root_skeleton_id = list(g.nodes())[0]
-    new_tree = nx.bfs_tree(g, root_skeleton_id)
+    # ID handling: method globally unique ID
+    def mapping_skel_nid(segment_id, nid, project_id):
+        max_nodes = 100000 # max. number of nodes / autoseg skeleton allowed
+        nr_projects = 10 # max number of projects / instance allowed
+        return segment_id * max_nodes * nr_projects + nid * nr_projects + project_id
+
+    # do relabeling and choose root node
+    g2 = nx.relabel_nodes(g, lambda x: mapping_skel_nid(segment_id, x, project_id))
+    root_skeleton_id = mapping_skel_nid(segment_id, 0, project_id)
+    new_tree = nx.bfs_tree(g2, root_skeleton_id)
 
     if DEBUG: print('fetch relations and classes')
     cursor.execute("SELECT id,relation_name from relation where project_id = {project_id};".format(project_id=project_id))
@@ -118,7 +124,7 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
 
     # insert root node
     parent_id = ""
-    n = g.node[root_skeleton_id]
+    n = g2.node[root_skeleton_id]
     query = """INSERT INTO treenode (project_id, location_x, location_y, location_z, editor_id,
                 user_id, skeleton_id, radius) VALUES ({},{},{},{},{},{},{},{});
         """.format(
@@ -135,7 +141,7 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
 
     # insert all chidren
     for parent_id, skeleton_node_id in new_tree.edges(data=False):
-        n = g.node[skeleton_node_id]
+        n = g2.node[skeleton_node_id]
         query = """INSERT INTO treenode (project_id, location_x, location_y, location_z, editor_id,
                     user_id, skeleton_id, radius, parent_id) VALUES ({},{},{},{},{},{},{},{},{});
             """.format(
@@ -153,14 +159,19 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
 
     cursor.execute('COMMIT;')
 
-    # TODO: call import_synapses_manual_skeleton with autoseg skeleton as seed
+    # call import_synapses_manual_skeleton with autoseg skeleton as seed
+    if DEBUG: print('call task: import_synapses_manual_skeleton')
+    task = import_synapses_manual_skeleton.delay(project_id, 
+        fetch_upstream, fetch_downstream, distance_threshold, 
+        skeleton_class_instance_id,
+        xres, yres, zres, segment_id)
 
     if DEBUG: print('task: import_autoseg_skeleton_with_synapses done')
 
 
 @task()
 def import_synapses_manual_skeleton(project_id, fetch_upstream, fetch_downstream,
-    distance_threshold, active_skeleton_id, xres, yres, zres):
+    distance_threshold, active_skeleton_id, xres, yres, zres, autoseg_segment_id = None):
     
     if DEBUG: print('task: import_synapses_manual_skeleton started')
 
@@ -179,16 +190,20 @@ def import_synapses_manual_skeleton(project_id, fetch_upstream, fetch_downstream
     # accessing the most recent autoseg data
     fafbseg.use_google_storage(GOOGLE_SEGMENTATION_STORAGE)
 
-    # retrieve segment ids
-    segment_ids = fafbseg.segmentation.get_seg_ids(skeleton[['x','y','z']])
+    if not autoseg_segment_id is None:
+        if DEBUG: print('active skeleton {} is derived from segment id {}'.format(active_skeleton_id, autoseg_segment_id))
+        overlapping_segmentids = set([autoseg_segment_id])
+    else:
+        # retrieve segment ids
+        segment_ids = fafbseg.segmentation.get_seg_ids(skeleton[['x','y','z']])
 
-    if DEBUG:
-        print('found segment ids for skeleton: ', segment_ids)
+        if DEBUG:
+            print('found segment ids for skeleton: ', segment_ids)
 
-    overlapping_segmentids = set()
-    for seglist in segment_ids:
-        for s in seglist:
-            overlapping_segmentids.add(s)
+        overlapping_segmentids = set()
+        for seglist in segment_ids:
+            for s in seglist:
+                overlapping_segmentids.add(s)
     
     # store skeleton in kdtree for fast distance computations
     tree = sp.KDTree( skeleton[['x', 'y', 'z']] )
