@@ -21,14 +21,146 @@ cv.meta.info['skeletons'] = CLOUDVOLUME_SKELETONS
 cv.skeleton.meta.refresh_info()
 cv.skeleton = ShardedPrecomputedSkeletonSource(cv.skeleton.meta, cv.cache, cv.config)
 
+
 @api_view(['GET'])
 def is_installed(request, project_id=None):
     """Check whether the extension circuitmap is installed."""
     return JsonResponse({'is_installed': True, 'msg': 'circuitmap is installed'})
 
+
 @api_view(['GET'])
 def index(request, project_id=None):
     return JsonResponse({'version': '0.1', 'app': 'circuitmap'})
+
+
+@task
+def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_downstream,
+    segment_id, xres, yres, zres):
+    
+    if DEBUG: print('task: import_autoseg_skeleton_with_synapses started')
+
+    # fetch and insert autoseg skeleton at location
+    if DEBUG: print('fetch skeleton for segment_id {}'.format(segment_id))
+    
+    s1 = cv.skeleton.get(segment_id)
+    nr_of_vertices = len(s1.vertices)
+    if DEBUG: print('autoseg skeleton for {} has {} nodes'.format(segment_id,
+     nr_of_vertices))
+    g=nx.Graph()
+    attrs = []
+    for idx in range(nr_of_vertices):
+        x,y,z=map(int,s1.vertices[idx,:]) 
+        r = s1.radius[idx]
+        attrs.append((int(idx),{'x':x,'y':y,'z':z,'r':float(r) }))
+    g.add_nodes_from(attrs)
+    edgs = []
+    for u,v in s1.edges:
+        edgs.append((int(u), int(v)))
+    g.add_edges_from(edgs)
+
+    # TODO: check if it skeleton already imported
+    # this check depends on the chosen implementation
+    nr_components = number_connected_components(g)
+    if nr_components > 1:
+        if DEBUG: print('more than one component in skeleton graph. use only largest component')
+        graph = max(nx.connected_component_subgraphs(g), key=len)
+    else:
+        graph = g
+
+    # TODO: depending on the implementation, choose a more sensible
+    # root node
+    root_skeleton_id = list(g.nodes())[0]
+    new_tree = nx.bfs_tree(g, root_skeleton_id)
+
+    if DEBUG: print('fetch relations and classes')
+    cursor.execute("SELECT id,relation_name from relation where project_id = {project_id};".format(project_id=project_id))
+    res = cursor.fetchall()
+    relations = dict([(v,u) for u,v in res])
+
+    cursor.execute("SELECT id,class_name from class where project_id = {project_id};".format(project_id=project_id))
+    res = cursor.fetchall()
+    classes = dict([(v,u) for u,v in res])
+
+    cursor.execute('BEGIN;')
+    
+    query = """
+    INSERT INTO class_instance (user_id, project_id, class_id, name)
+                VALUES ({},{},{},'{}') RETURNING id;
+    """.format(DEFAULT_IMPORT_USER, project_id, classes['neuron'] ,"neuron {}".format(segment_id))
+    if DEBUG:
+        print(query)
+    else:
+        cursor.execute(query)
+        neuron_class_instance_id = cursor.fetchone()[0]
+    
+    if DEBUG: print('got neuron', neuron_class_instance_id)
+
+    query = """
+    INSERT INTO class_instance (user_id, project_id, class_id, name)
+                VALUES ({},{},{},'{}') RETURNING id;
+    """.format(DEFAULT_IMPORT_USER, project_id, classes['skeleton'] ,"skeleton {}".format(segment_id))
+    if DEBUG:
+        print(query)
+    else:
+        cursor.execute(query)
+        skeleton_class_instance_id = cursor.fetchone()[0]
+    if DEBUG: print('got skeleton', skeleton_class_instance_id)
+
+    query = """
+    INSERT INTO class_instance_class_instance (user_id, project_id, class_instance_a, class_instance_b, relation_id)
+                VALUES ({},{},{},{},{}) RETURNING id;
+    """.format(DEFAULT_IMPORT_USER, project_id, skeleton_class_instance_id, neuron_class_instance_id, relations['model_of'])
+    if DEBUG:
+        print(query)
+    else:
+        cursor.execute(query)
+        cici_id = cursor.fetchone()[0]
+
+    # insert treenodes
+
+    # insert root node
+    parent_id = ""
+    n = g.node[root_skeleton_id]
+    query = """INSERT INTO treenode (project_id, location_x, location_y, location_z, editor_id,
+                user_id, skeleton_id, radius) VALUES ({},{},{},{},{},{},{},{},{});
+        """.format(
+         project_id,
+         n['x'],
+         n['y'],
+         n['z'],
+         DEFAULT_IMPORT_USER,
+         DEFAULT_IMPORT_USER,
+         skeleton_class_instance_id,
+         n['r'])
+    if DEBUG:
+        print(query)
+    else:
+        cursor.execute(query)
+
+    # insert all chidren
+    for parent_id, skeleton_node_id in new_tree.edges(data=False):
+        n = g.node[skeleton_node_id]
+        query = """INSERT INTO treenode (project_id, location_x, location_y, location_z, editor_id,
+                    user_id, skeleton_id, radius, parent_id) VALUES ({},{},{},{},{},{},{},{},{},{});
+            """.format(
+             project_id,
+             n['x'],
+             n['y'],
+             n['z'],
+             DEFAULT_IMPORT_USER,
+             DEFAULT_IMPORT_USER,
+             skeleton_class_instance_id,
+             n['r'],
+            parent_id)
+        if DEBUG:
+            print(query)
+        else:
+            cursor.execute(query)
+
+    cursor.execute('COMMIT;')
+
+    if DEBUG: print('task: import_autoseg_skeleton_with_synapses done')
+
 
 @task()
 def import_synapses_manual_skeleton(project_id, fetch_upstream, fetch_downstream,
@@ -70,23 +202,17 @@ def import_synapses_manual_skeleton(project_id, fetch_upstream, fetch_downstream
     all_pre_links = []
     all_post_links = []
 
-    # TODO: remove later when data is ingested into app specific table (i.e circuit_synlinks)
-    from .remote import cur
-    def get_links(segment_id, where='segmentid_x', table='synlinks_v2'):
+    # TODO: use local SQlite DB for now. later ingest data into 
+    # circuitmap managed table (i.e circuit_synlinks)
+    conn = sqlite3.connect(SQLITE3_DB_PATH)
+    cur = conn.cursor()
+
+    def get_links(segment_id, where='segmentid_x', table='synlinks'):
         cols = ['ids', 'pre_x', 'pre_y', 'pre_z', 'post_x', 'post_y', 
                 'post_z', 'scores', 'segmentid_x', 'segmentid_y', 'max', 'index']
         cur.execute('SELECT * from {} where {} = {};'.format(table, where, segment_id))
         pre_links = cur.fetchall()
         return pd.DataFrame.from_records(pre_links, columns=cols)
-
-    """ TODO LATER:
-    def get_links(segment_id, where='segmentid_x', table='circuitmap_synlinks'):
-        cols = ['ids', 'pre_x', 'pre_y', 'pre_z', 'post_x', 'post_y', 
-                'post_z', 'scores', 'segmentid_x', 'segmentid_y', 'max', 'index']
-        cur.execute('SELECT * from {} where {} = {};'.format(table, where, segment_id))
-        pre_links = cursor.fetchall()
-        return pd.DataFrame.from_records(pre_links, columns=cols)
-    """
 
     # retrieve synaptic links for each autoseg skeleton
     for segment_id  in list(overlapping_segmentids):
@@ -196,9 +322,9 @@ def import_synapses_manual_skeleton(project_id, fetch_upstream, fetch_downstream
 def fetch_synapses(request: HttpRequest, project_id=None):
 
     # TODO: issue with coordinate are float
-    x = int(request.POST.get('x', None))
-    y = int(request.POST.get('y', None))
-    z = int(request.POST.get('z', None))
+    x = int(round(float(request.POST.get('x', -1))))
+    y = int(round(float(request.POST.get('y', -1))))
+    z = int(round(float(request.POST.get('z', -1))))
 
     xres = int(request.POST.get('xres', 1))
     yres = int(request.POST.get('yres', 1))
@@ -209,18 +335,24 @@ def fetch_synapses(request: HttpRequest, project_id=None):
     distance_threshold = int(request.POST.get('distance_threshold', 1000 ))
     active_skeleton_id = int(request.POST.get('active_skeleton', -1 ))
 
+    if x == -1 or y == -1 or z == -1:
+        return JsonResponse({'project_id': project_id, 'msg': 'Invalid location coordinates'})
+
     if active_skeleton_id == -1:
-        # look up segment id at location
+        # look up segment id at location and fetch synapses
         try:
             segment_id = cv[x//2,y//2,z,0][0][0][0][0]
         except:
             segment_id = None
 
-        # TODO: ingest autoseg skeleton, then user can call function later to populate
+        task = import_autoseg_skeleton_with_synapses.delay(project_id, 
+            fetch_upstream, fetch_downstream, 
+            segment_id, xres, yres, zres)
 
         return JsonResponse({'project_id': project_id, 'segment_id': str(segment_id)})
 
     else:
+        # fetch synapses for manual skeleton
         task = import_synapses_manual_skeleton.delay(project_id, 
             fetch_upstream, fetch_downstream, distance_threshold, 
             active_skeleton_id,
