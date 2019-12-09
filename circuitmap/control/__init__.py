@@ -17,12 +17,6 @@ from celery.task import task
 
 from .settings import *
 
-cv = CloudVolume(CLOUDVOLUME_URL, use_https=True)
-cv.meta.info['skeletons'] = CLOUDVOLUME_SKELETONS
-cv.skeleton.meta.refresh_info()
-cv.skeleton = ShardedPrecomputedSkeletonSource(cv.skeleton.meta, cv.cache, cv.config)
-
-
 @api_view(['GET'])
 def is_installed(request, project_id=None):
     """Check whether the extension circuitmap is installed."""
@@ -33,140 +27,6 @@ def is_installed(request, project_id=None):
 def index(request, project_id=None):
     return JsonResponse({'version': '0.1', 'app': 'circuitmap'})
 
-
-@task
-def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_downstream,
-    segment_id, xres, yres, zres):
-    
-    if DEBUG: print('task: import_autoseg_skeleton_with_synapses started')
-    cursor = connection.cursor()
-
-    # fetch and insert autoseg skeleton at location
-    if DEBUG: print('fetch skeleton for segment_id {}'.format(segment_id))
-    
-    s1 = cv.skeleton.get(segment_id)
-    nr_of_vertices = len(s1.vertices)
-    if DEBUG: print('autoseg skeleton for {} has {} nodes'.format(segment_id,
-     nr_of_vertices))
-    
-    if DEBUG: print('generate graph for skeleton')
-    g=nx.Graph()
-    attrs = []
-    for idx in range(nr_of_vertices):
-        x,y,z=map(int,s1.vertices[idx,:]) 
-        r = s1.radius[idx]
-        attrs.append((int(idx),{'x':x,'y':y,'z':z,'r':float(r) }))
-    g.add_nodes_from(attrs)
-    edgs = []
-    for u,v in s1.edges:
-        edgs.append((int(u), int(v)))
-    g.add_edges_from(edgs)
-
-    # TODO: check if it skeleton already imported
-    # this check depends on the chosen implementation
-    if DEBUG: print('check number of connected components')
-    nr_components = nx.number_connected_components(g)
-    if nr_components > 1:
-        if DEBUG: print('more than one component in skeleton graph. use only largest component')
-        graph = max(nx.connected_component_subgraphs(g), key=len)
-    else:
-        graph = g
-
-    # ID handling: method globally unique ID
-    def mapping_skel_nid(segment_id, nid, project_id):
-        max_nodes = 100000 # max. number of nodes / autoseg skeleton allowed
-        nr_projects = 10 # max number of projects / instance allowed
-        return segment_id * max_nodes * nr_projects + nid * nr_projects + project_id
-
-    # do relabeling and choose root node
-    g2 = nx.relabel_nodes(g, lambda x: mapping_skel_nid(segment_id, x, project_id))
-    root_skeleton_id = mapping_skel_nid(segment_id, 0, project_id)
-    new_tree = nx.bfs_tree(g2, root_skeleton_id)
-
-    if DEBUG: print('fetch relations and classes')
-    cursor.execute("SELECT id,relation_name from relation where project_id = {project_id};".format(project_id=project_id))
-    res = cursor.fetchall()
-    relations = dict([(v,u) for u,v in res])
-
-    cursor.execute("SELECT id,class_name from class where project_id = {project_id};".format(project_id=project_id))
-    res = cursor.fetchall()
-    classes = dict([(v,u) for u,v in res])
-
-    cursor.execute('BEGIN;')
-    
-    query = """
-    INSERT INTO class_instance (user_id, project_id, class_id, name)
-                VALUES ({},{},{},'{}') RETURNING id;
-    """.format(DEFAULT_IMPORT_USER, project_id, classes['neuron'] ,"neuron {}".format(segment_id))
-    if DEBUG: print(query)
-    cursor.execute(query)
-    neuron_class_instance_id = cursor.fetchone()[0]
-    if DEBUG: print('got neuron', neuron_class_instance_id)
-
-    query = """
-    INSERT INTO class_instance (user_id, project_id, class_id, name)
-                VALUES ({},{},{},'{}') RETURNING id;
-    """.format(DEFAULT_IMPORT_USER, project_id, classes['skeleton'] ,"skeleton {}".format(segment_id))
-    if DEBUG: print(query)
-    cursor.execute(query)
-    skeleton_class_instance_id = cursor.fetchone()[0]
-    if DEBUG: print('got skeleton', skeleton_class_instance_id)
-
-    query = """
-    INSERT INTO class_instance_class_instance (user_id, project_id, class_instance_a, class_instance_b, relation_id)
-                VALUES ({},{},{},{},{}) RETURNING id;
-    """.format(DEFAULT_IMPORT_USER, project_id, skeleton_class_instance_id, neuron_class_instance_id, relations['model_of'])
-    if DEBUG: print(query)
-    cursor.execute(query)
-    cici_id = cursor.fetchone()[0]
-
-    # insert treenodes
-
-    # insert root node
-    parent_id = ""
-    n = g2.node[root_skeleton_id]
-    query = """INSERT INTO treenode (project_id, location_x, location_y, location_z, editor_id,
-                user_id, skeleton_id, radius) VALUES ({},{},{},{},{},{},{},{});
-        """.format(
-         project_id,
-         n['x'],
-         n['y'],
-         n['z'],
-         DEFAULT_IMPORT_USER,
-         DEFAULT_IMPORT_USER,
-         skeleton_class_instance_id,
-         n['r'])
-    if DEBUG: print(query)
-    cursor.execute(query)
-
-    # insert all chidren
-    for parent_id, skeleton_node_id in new_tree.edges(data=False):
-        n = g2.node[skeleton_node_id]
-        query = """INSERT INTO treenode (project_id, location_x, location_y, location_z, editor_id,
-                    user_id, skeleton_id, radius, parent_id) VALUES ({},{},{},{},{},{},{},{},{});
-            """.format(
-             project_id,
-             n['x'],
-             n['y'],
-             n['z'],
-             DEFAULT_IMPORT_USER,
-             DEFAULT_IMPORT_USER,
-             skeleton_class_instance_id,
-             n['r'],
-            parent_id)
-        if DEBUG: print(query)
-        cursor.execute(query)
-
-    cursor.execute('COMMIT;')
-
-    # call import_synapses_manual_skeleton with autoseg skeleton as seed
-    if DEBUG: print('call task: import_synapses_manual_skeleton')
-    task = import_synapses_manual_skeleton.delay(project_id, 
-        fetch_upstream, fetch_downstream, distance_threshold, 
-        skeleton_class_instance_id,
-        xres, yres, zres, segment_id)
-
-    if DEBUG: print('task: import_autoseg_skeleton_with_synapses done')
 
 
 @task()
@@ -246,7 +106,7 @@ def import_synapses_manual_skeleton(project_id, fetch_upstream, fetch_downstream
         all_pre_links_concat['skeleton_node_id_index'] = res[1]
         for idx, r in all_pre_links_concat.iterrows():
             # skip link if beyond distance threshold
-            if r['dist'] > distance_threshold:
+            if distance_threshold >= 0 and r['dist'] > distance_threshold:
                 continue
             connector_id = CONNECTORID_OFFSET + int(r['index']) * 10 
             if not connector_id in connectors:
@@ -265,7 +125,7 @@ def import_synapses_manual_skeleton(project_id, fetch_upstream, fetch_downstream
             
         for idx, r in all_post_links_concat.iterrows():
             # skip link if beyond distance threshold
-            if r['dist'] > distance_threshold:
+            if distance_threshold >= 0 and r['dist'] > distance_threshold:
                 continue
 
             connector_id = CONNECTORID_OFFSET + int(r['index']) * 10 
@@ -356,11 +216,15 @@ def fetch_synapses(request: HttpRequest, project_id=None):
         except:
             segment_id = None
 
-        task = import_autoseg_skeleton_with_synapses.delay(project_id, 
-            fetch_upstream, fetch_downstream, 
-            segment_id, xres, yres, zres)
-
-        return JsonResponse({'project_id': project_id, 'segment_id': str(segment_id)})
+        if segment_id is None:
+            return JsonResponse({'project_id': project_id, 'msg': 'No segment found at this location.'})
+        else:
+            if DEBUG: print('before task delay')
+            task = import_autoseg_skeleton_with_synapses.delay(project_id, 
+                fetch_upstream, fetch_downstream, 
+                segment_id, xres, yres, zres)
+            if DEBUG: print('afer task delay')
+            return JsonResponse({'project_id': project_id, 'segment_id': str(segment_id)})
 
     else:
         # fetch synapses for manual skeleton
@@ -371,3 +235,153 @@ def fetch_synapses(request: HttpRequest, project_id=None):
         return JsonResponse({'project_id': project_id})
 
     
+@task
+def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_downstream,
+    segment_id, xres, yres, zres):
+    
+    # ID handling: method globally unique ID
+    def mapping_skel_nid(segment_id, nid, project_id):
+        max_nodes = 100000 # max. number of nodes / autoseg skeleton allowed
+        nr_projects = 10 # max number of projects / instance allowed
+        return segment_id * max_nodes * nr_projects + nid * nr_projects + project_id
+
+    if DEBUG: print('task: import_autoseg_skeleton_with_synapses started')
+    cursor = connection.cursor()
+
+    # check if skeleton of autoseg segment_id was previously imported
+    if DEBUG: print('check if already imported')
+    cursor.execute('SELECT id, skeleton_id FROM treenode WHERE project_id = {} and id = {}'.format(project_id, mapping_skel_nid(segment_id, 0, project_id)))
+    res = cursor.fetchone()
+    if not res is None:
+        node_id, skeleton_class_instance_id = res
+        if DEBUG: print('autoseg skeleton was previously imported. skip reimport. (current skeletonid is {})'.format(skeleton_class_instance_id))
+    else:        
+
+        # fetch and insert autoseg skeleton at location
+        if DEBUG: print('fetch skeleton for segment_id {}'.format(segment_id))
+        
+        cv = CloudVolume(CLOUDVOLUME_URL, use_https=False, parallel=False)
+        cv.meta.info['skeletons'] = CLOUDVOLUME_SKELETONS
+        cv.skeleton.meta.refresh_info()
+        cv.skeleton = ShardedPrecomputedSkeletonSource(cv.skeleton.meta, cv.cache, cv.config)
+
+        s1 = cv.skeleton.get(segment_id)
+        nr_of_vertices = len(s1.vertices)
+        if DEBUG: print('autoseg skeleton for {} has {} nodes'.format(segment_id,
+         nr_of_vertices))
+        
+        if DEBUG: print('generate graph for skeleton')
+        g=nx.Graph()
+        attrs = []
+        for idx in range(nr_of_vertices):
+            x,y,z=map(int,s1.vertices[idx,:]) 
+            r = s1.radius[idx]
+            attrs.append((int(idx),{'x':x,'y':y,'z':z,'r':float(r) }))
+        g.add_nodes_from(attrs)
+        edgs = []
+        for u,v in s1.edges:
+            edgs.append((int(u), int(v)))
+        g.add_edges_from(edgs)
+
+        # TODO: check if it skeleton already imported
+        # this check depends on the chosen implementation
+        if DEBUG: print('check number of connected components')
+        nr_components = nx.number_connected_components(g)
+        if nr_components > 1:
+            if DEBUG: print('more than one component in skeleton graph. use only largest component')
+            graph = max(nx.connected_component_subgraphs(g), key=len)
+        else:
+            graph = g
+
+        # do relabeling and choose root node
+        g2 = nx.relabel_nodes(g, lambda x: mapping_skel_nid(segment_id, x, project_id))
+        root_skeleton_id = mapping_skel_nid(segment_id, 0, project_id)
+        new_tree = nx.bfs_tree(g2, root_skeleton_id)
+
+        if DEBUG: print('fetch relations and classes')
+        cursor.execute("SELECT id,relation_name from relation where project_id = {project_id};".format(project_id=project_id))
+        res = cursor.fetchall()
+        relations = dict([(v,u) for u,v in res])
+
+        cursor.execute("SELECT id,class_name from class where project_id = {project_id};".format(project_id=project_id))
+        res = cursor.fetchall()
+        classes = dict([(v,u) for u,v in res])
+
+        cursor.execute('BEGIN;')
+        
+        query = """
+        INSERT INTO class_instance (user_id, project_id, class_id, name)
+                    VALUES ({},{},{},'{}') RETURNING id;
+        """.format(DEFAULT_IMPORT_USER, project_id, classes['neuron'] ,"neuron {}".format(segment_id))
+        if DEBUG: print(query)
+        cursor.execute(query)
+        neuron_class_instance_id = cursor.fetchone()[0]
+        if DEBUG: print('got neuron', neuron_class_instance_id)
+
+        query = """
+        INSERT INTO class_instance (user_id, project_id, class_id, name)
+                    VALUES ({},{},{},'{}') RETURNING id;
+        """.format(DEFAULT_IMPORT_USER, project_id, classes['skeleton'] ,"skeleton {}".format(segment_id))
+        if DEBUG: print(query)
+        cursor.execute(query)
+        skeleton_class_instance_id = cursor.fetchone()[0]
+        if DEBUG: print('got skeleton', skeleton_class_instance_id)
+
+        query = """
+        INSERT INTO class_instance_class_instance (user_id, project_id, class_instance_a, class_instance_b, relation_id)
+                    VALUES ({},{},{},{},{}) RETURNING id;
+        """.format(DEFAULT_IMPORT_USER, project_id, skeleton_class_instance_id, neuron_class_instance_id, relations['model_of'])
+        if DEBUG: print(query)
+        cursor.execute(query)
+        cici_id = cursor.fetchone()[0]
+
+        # insert treenodes
+
+        # insert root node
+        parent_id = ""
+        n = g2.node[root_skeleton_id]
+        query = """INSERT INTO treenode (id, project_id, location_x, location_y, location_z, editor_id,
+                    user_id, skeleton_id, radius) VALUES ({},{},{},{},{},{},{},{},{});
+            """.format(
+             root_skeleton_id,
+             project_id,
+             n['x'],
+             n['y'],
+             n['z'],
+             DEFAULT_IMPORT_USER,
+             DEFAULT_IMPORT_USER,
+             skeleton_class_instance_id,
+             n['r'])
+        if DEBUG: print(query)
+        cursor.execute(query)
+
+        # insert all chidren
+        for parent_id, skeleton_node_id in new_tree.edges(data=False):
+            n = g2.node[skeleton_node_id]
+            query = """INSERT INTO treenode (id,project_id, location_x, location_y, location_z, editor_id,
+                        user_id, skeleton_id, radius, parent_id) VALUES ({},{},{},{},{},{},{},{},{},{});
+                """.format(
+                 skeleton_node_id,
+                 project_id,
+                 n['x'],
+                 n['y'],
+                 n['z'],
+                 DEFAULT_IMPORT_USER,
+                 DEFAULT_IMPORT_USER,
+                 skeleton_class_instance_id,
+                 n['r'],
+                parent_id)
+            if DEBUG: print(query)
+            cursor.execute(query)
+
+        cursor.execute('COMMIT;')
+
+    # call import_synapses_manual_skeleton with autoseg skeleton as seed
+    if DEBUG: print('call task: import_synapses_manual_skeleton')
+
+    import_synapses_manual_skeleton.delay(project_id, 
+        fetch_upstream, fetch_downstream, -1, 
+        skeleton_class_instance_id,
+        xres, yres, zres, segment_id)
+
+    if DEBUG: print('task: import_autoseg_skeleton_with_synapses done')
