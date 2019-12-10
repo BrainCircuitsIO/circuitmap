@@ -191,17 +191,8 @@ def fetch_synapses(request: HttpRequest, project_id=None):
             task = import_autoseg_skeleton_with_synapses.delay(pid, 
                 segment_id, xres, yres, zres)
 
-            # get all partners partners
-            conn = sqlite3.connect(SQLITE3_DB_PATH)
-            cur = conn.cursor()
-
-            g = load_subgraph(cur, segment_id)
-
-            for partner_segment_id in get_presynaptic_skeletons(g, synaptic_count_threshold = 0):
-                print('spawn task for presynatic segment_id', partner_segment_id)
-
-            for partner_segment_id in get_postsynaptic_skeletons(g, synaptic_count_threshold = 0):
-                print('spawn task for postsynaptic segment_id', partner_segment_id)
+            task  = import_upstream_downstream_partners.delay(segment_id, fetch_upstream, fetch_downstream,
+                pid, xres, yres, zres)
 
             return JsonResponse({'project_id': pid, 'segment_id': str(segment_id)})
 
@@ -210,6 +201,26 @@ def fetch_synapses(request: HttpRequest, project_id=None):
         task = import_synapses_for_existing_skeleton.delay(pid, 
             distance_threshold, active_skeleton_id, xres, yres, zres)
         return JsonResponse({'project_id': pid})
+
+@task()
+def import_upstream_downstream_partners(segment_id, fetch_upstream, fetch_downstream, pid, xres, yres, zres):
+    # get all partners partners
+    conn = sqlite3.connect(SQLITE3_DB_PATH)
+    cur = conn.cursor()
+
+    g = load_subgraph(cur, segment_id)
+
+    if fetch_upstream:
+        for partner_segment_id in get_presynaptic_skeletons(g, synaptic_count_threshold = 0):
+            print('spawn task for presynaptic segment_id', partner_segment_id)
+            task = import_autoseg_skeleton_with_synapses.delay(pid, 
+                partner_segment_id, xres, yres, zres)
+
+    if fetch_downstream:
+        for partner_segment_id in get_postsynaptic_skeletons(g, synaptic_count_threshold = 0):
+            print('spawn task for postsynaptic segment_id', partner_segment_id)
+            task = import_autoseg_skeleton_with_synapses.delay(pid, 
+                partner_segment_id, xres, yres, zres)
 
 
 @task()
