@@ -18,6 +18,120 @@ from celery.task import task
 
 from .settings import *
 
+cv = CloudVolume(CLOUDVOLUME_URL_REMOTE, use_https=True, parallel=False)
+cv.meta.info['skeletons'] = CLOUDVOLUME_SKELETONS
+cv.skeleton.meta.refresh_info()
+cv.skeleton = ShardedPrecomputedSkeletonSource(cv.skeleton.meta, cv.cache, cv.config)
+
+
+def get_links(cursor, segment_id, where='segmentid_x', table='synlinks'):
+    cols = ['offset', 'pre_x', 'pre_y', 'pre_z', 'post_x', 'post_y', 
+            'post_z', 'scores', 'cleft_scores', 'segmentid_x', 'segmentid_y']
+    cursor.execute('SELECT * from {} where {} = {};'.format(table, where, segment_id))
+    pre_links = cursor.fetchall()
+    return pd.DataFrame.from_records(pre_links, columns=cols)
+
+
+def load_subgraph(cursor, start_segment_id, order = 0):
+    """ Return a NetworkX graph with segments as nodes and synaptic connection
+    as edges with synapse counts
+    
+    start_segment_id: starting segment for subgraph loading
+    
+    order: number of times to expand along edges
+    """
+    fetch_segments = set([start_segment_id])
+    fetched_segments = set()
+    g = nx.DiGraph()
+        
+    for ordern in range(order+1):
+        print('order', ordern, 'need to fetch', len(fetch_segments), 'segments')
+        for i, segment_id in enumerate(list(fetch_segments)):
+            
+            print('process segment', i, 'with segment_id', segment_id)
+
+            print('retrieve pre_links')
+            pre_links = get_links(cursor, segment_id, where='segmentid_x')
+
+            print('retrieve post_links')
+            post_links = get_links(cursor, segment_id, where='segmentid_y')
+
+            print('build graph ...')
+            for idx, r in pre_links.iterrows():
+                from_id = int(r['segmentid_x'])
+                to_id = int(r['segmentid_y'])
+                if (from_id,to_id) in g.edges:
+                    g.edges[(from_id,to_id)]['count'] += 1
+                else:
+                    g.add_edge(from_id, to_id, count= 1)
+
+            for idx, r in post_links.iterrows():
+                from_id = int(r['segmentid_x'])
+                to_id = int(r['segmentid_y'])
+                if (from_id,to_id) in g.edges:
+                    g.edges[(from_id,to_id)]['count'] += 1
+                else:
+                    g.add_edge(from_id, to_id, count= 1)
+
+            fetched_segments.add(segment_id)
+                    
+            all_postsynaptic_segments = set(pre_links['segmentid_y'])
+            fetch_segments = fetch_segments.union(all_postsynaptic_segments)
+            
+            all_presynaptic_segments = set(post_links['segmentid_x'])
+            fetch_segments = fetch_segments.union(all_presynaptic_segments)
+        
+        # remove all segments that were already fetched
+        fetch_segments = fetch_segments.difference(fetched_segments)
+        
+        # always remove 0
+        fetch_segments.remove(0)
+
+    return g
+
+def get_presynaptic_skeletons(g, synaptic_count_threshold = 0):
+    res = set()
+    for nid in g.predecessors(segment_id):
+        if nid == segment_id or nid == 0:
+            continue
+        ed = g.get_edge_data(nid, segment_id)
+        if ed['count'] > synaptic_count_threshold:
+            res.add(nid)
+    return list(res)
+
+
+def get_postsynaptic_skeletons(g, synaptic_count_threshold = 0):
+    res = set()
+    for nid in g.successors(segment_id):
+        if nid == segment_id or nid == 0:
+            continue
+        ed = g.get_edge_data(segment_id, nid)
+        if ed['count'] > synaptic_count_threshold:
+            res.add(nid)
+    return list(res)
+
+
+@api_view(['GET'])
+def get_neighbors_graph(request, segment_id):    
+    conn = sqlite3.connect(SQLITE3_DB_PATH)
+    cur = conn.cursor()
+    g = load_subgraph(cur, segment_id, order = 0)
+    from networkx.readwrite import json_graph
+    return JsonResponse({'graph': json_graph.node_link_data(g)})
+
+
+@api_view(['GET'])
+def get_synapses(request, segment_id):    
+    conn = sqlite3.connect(SQLITE3_DB_PATH)
+    cur = conn.cursor()
+
+    print('retrieve pre_links')
+    pre_links = get_links(cursor, segment_id, where='segmentid_x')
+
+    print('retrieve post_links')
+    post_links = get_links(cursor, segment_id, where='segmentid_y')
+
+    return JsonResponse({'pre_links': pre_links.to_json(), 'post_links': post_links.to_json()})
 
 
 @api_view(['GET'])
@@ -25,28 +139,84 @@ def is_installed(request, project_id=None):
     """Check whether the extension circuitmap is installed."""
     return JsonResponse({'is_installed': True, 'msg': 'circuitmap is installed'})
 
-
 @api_view(['GET'])
 def index(request, project_id=None):
     return JsonResponse({'version': '0.1', 'app': 'circuitmap'})
 
+@api_view(['GET'])
+def test(request, project_id=None):
+    task = testtask.delay()
+    return JsonResponse({'msg': 'testtask'})
 
 @task()
 def testtask():
     print('testtask')
-    cv = CloudVolume(CLOUDVOLUME_URL, use_https=False, parallel=False)
-    cv.meta.info['skeletons'] = CLOUDVOLUME_SKELETONS
-    cv.skeleton.meta.refresh_info()
-    cv.skeleton = ShardedPrecomputedSkeletonSource(cv.skeleton.meta, cv.cache, cv.config)
-    s1 = cv.skeleton.get(4643129657)
-    print("nr vert", len(s1.vertices))
+
+
+@api_view(['POST'])
+def fetch_synapses(request: HttpRequest, project_id=None):
+    x = int(round(float(request.POST.get('x', -1))))
+    y = int(round(float(request.POST.get('y', -1))))
+    z = int(round(float(request.POST.get('z', -1))))
+
+    xres = int(request.POST.get('xres', 1))
+    yres = int(request.POST.get('yres', 1))
+    zres = int(request.POST.get('zres', 1))
+
+    fetch_upstream = bool(request.POST.get('fetch_upstream', False ))
+    fetch_downstream = bool(request.POST.get('fetch_downstream', False ))
+    distance_threshold = int(request.POST.get('distance_threshold', 1000 ))
+    active_skeleton_id = int(request.POST.get('active_skeleton', -1 ))
+
+    pid = int(project_id)
+
+    if x == -1 or y == -1 or z == -1:
+        return JsonResponse({'project_id': pid, 'msg': 'Invalid location coordinates'})
+
+    if active_skeleton_id == -1:
+
+        # look up segment id at location and fetch synapses        
+        try:
+            segment_id = int(cv[x//2,y//2,z,0][0][0][0][0])
+        except Exception as ex:
+            print('Exception occurred: {}'.format(ex))
+            segment_id = None
+            return JsonResponse({'project_id': pid, 'msg': 'No segment found at this location.', 'ex': ex})
+
+        if segment_id is None or segment_id == 0:
+            return JsonResponse({'project_id': pid, 'msg': 'No segment found at this location.'})
+        else:
+            if DEBUG: print('spawn task: import_autoseg_skeleton_with_synapses')
+
+            task = import_autoseg_skeleton_with_synapses.delay(pid, 
+                segment_id, xres, yres, zres)
+
+            # get all partners partners
+            conn = sqlite3.connect(SQLITE3_DB_PATH)
+            cur = conn.cursor()
+
+            g = load_subgraph(cur, segment_id)
+
+            for partner_segment_id in get_presynaptic_skeletons(g, synaptic_count_threshold = 0):
+                print('spawn task for presynatic segment_id', partner_segment_id)
+
+            for partner_segment_id in get_postsynaptic_skeletons(g, synaptic_count_threshold = 0):
+                print('spawn task for postsynaptic segment_id', partner_segment_id)
+
+            return JsonResponse({'project_id': pid, 'segment_id': str(segment_id)})
+
+    else:
+        # fetch synapses for manual skeleton
+        task = import_synapses_for_existing_skeleton.delay(pid, 
+            distance_threshold, active_skeleton_id, xres, yres, zres)
+        return JsonResponse({'project_id': pid})
 
 
 @task()
-def import_synapses_manual_skeleton(project_id, fetch_upstream, fetch_downstream,
-    distance_threshold, active_skeleton_id, xres, yres, zres, autoseg_segment_id = None):
+def import_synapses_for_existing_skeleton(project_id, distance_threshold, active_skeleton_id,
+    xres, yres, zres, autoseg_segment_id = None):
     
-    if DEBUG: print('task: import_synapses_manual_skeleton started')
+    if DEBUG: print('task: import_synapses_for_existing_skeleton started')
 
     try:
         # retrieve skeleton with all nodes directly from the database
@@ -94,18 +264,11 @@ def import_synapses_manual_skeleton(project_id, fetch_upstream, fetch_downstream
         conn = sqlite3.connect(SQLITE3_DB_PATH)
         cur = conn.cursor()
 
-        def get_links(segment_id, where='segmentid_x', table='synlinks'):
-            cols = ['offset', 'pre_x', 'pre_y', 'pre_z', 'post_x', 'post_y', 
-                    'post_z', 'scores', 'cleft_scores', 'segmentid_x', 'segmentid_y']
-            cur.execute('SELECT * from {} where {} = {};'.format(table, where, segment_id))
-            pre_links = cur.fetchall()
-            return pd.DataFrame.from_records(pre_links, columns=cols)
-
         # retrieve synaptic links for each autoseg skeleton
         for segment_id in list(overlapping_segmentids):
             if DEBUG: print('process segment: ', segment_id)
-            all_pre_links.append(get_links(segment_id, 'segmentid_x'))
-            all_post_links.append(get_links(segment_id, 'segmentid_y'))
+            all_pre_links.append(get_links(cur, segment_id, 'segmentid_x'))
+            all_post_links.append(get_links(cur, segment_id, 'segmentid_y'))
             
         all_pre_links_concat = pd.concat(all_pre_links)
         all_post_links_concat = pd.concat(all_post_links)
@@ -201,69 +364,15 @@ def import_synapses_manual_skeleton(project_id, fetch_upstream, fetch_downstream
 
             cursor.execute(q)
 
-        if DEBUG: print('task: import_synapses_manual_skeleton started: done')
+        if DEBUG: print('task: import_synapses_for_existing_skeleton started: done')
     except Exception as ex:
         print('Exception occurred: {}'.format(ex))
 
 
-@api_view(['POST'])
-def fetch_synapses(request: HttpRequest, project_id=None):
-
-    # TODO: issue with coordinate are float
-    x = int(round(float(request.POST.get('x', -1))))
-    y = int(round(float(request.POST.get('y', -1))))
-    z = int(round(float(request.POST.get('z', -1))))
-
-    xres = int(request.POST.get('xres', 1))
-    yres = int(request.POST.get('yres', 1))
-    zres = int(request.POST.get('zres', 1))
-
-    fetch_upstream = bool(request.POST.get('fetch_upstream', False ))
-    fetch_downstream = bool(request.POST.get('fetch_downstream', False ))
-    distance_threshold = int(request.POST.get('distance_threshold', 1000 ))
-    active_skeleton_id = int(request.POST.get('active_skeleton', -1 ))
-
-    pid = int(project_id)
-
-    if x == -1 or y == -1 or z == -1:
-        return JsonResponse({'project_id': pid, 'msg': 'Invalid location coordinates'})
-
-    if active_skeleton_id == -1:
-        # look up segment id at location and fetch synapses
-        cv = CloudVolume(CLOUDVOLUME_URL_REMOTE, use_https=True, parallel=False)
-        cv.meta.info['skeletons'] = CLOUDVOLUME_SKELETONS
-        cv.skeleton.meta.refresh_info()
-        cv.skeleton = ShardedPrecomputedSkeletonSource(cv.skeleton.meta, cv.cache, cv.config)
-        try:
-            segment_id = cv[x//2,y//2,z,0][0][0][0][0]
-        except Exception as ex:
-            print('Exception occurred: {}'.format(ex))
-            segment_id = None
-            return JsonResponse({'project_id': pid, 'msg': 'No segment found at this location.', 'ex': ex})
-
-        if segment_id is None:
-            return JsonResponse({'project_id': pid, 'msg': 'No segment found at this location.'})
-        else:
-            if DEBUG: print('before task delay')
-            task = import_autoseg_skeleton_with_synapses.delay(pid, 
-                fetch_upstream, fetch_downstream, 
-                segment_id, xres, yres, zres)
-            if DEBUG: print('afer task delay')
-            return JsonResponse({'project_id': pid, 'segment_id': str(segment_id)})
-
-    else:
-        # fetch synapses for manual skeleton
-        task = import_synapses_manual_skeleton.delay(pid, 
-            fetch_upstream, fetch_downstream, distance_threshold, 
-            active_skeleton_id,
-            xres, yres, zres)
-        return JsonResponse({'project_id': pid})
-
-    
 @task
-def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_downstream, segment_id, xres, yres, zres):
+def import_autoseg_skeleton_with_synapses(project_id, segment_id, xres, yres, zres):
 
-    try:    
+    try:
         # ID handling: method globally unique ID
         def mapping_skel_nid(segment_id, nid, project_id):
             max_nodes = 100000 # max. number of nodes / autoseg skeleton allowed
@@ -401,13 +510,11 @@ def import_autoseg_skeleton_with_synapses(project_id, fetch_upstream, fetch_down
 
             cursor.execute('COMMIT;')
 
-        # call import_synapses_manual_skeleton with autoseg skeleton as seed
-        if DEBUG: print('call task: import_synapses_manual_skeleton')
+        # call import_synapses_for_existing_skeleton with autoseg skeleton as seed
+        if DEBUG: print('call task: import_synapses_for_existing_skeleton')
 
-        import_synapses_manual_skeleton.delay(project_id, 
-            fetch_upstream, fetch_downstream, -1, 
-            skeleton_class_instance_id,
-            xres, yres, zres, segment_id)
+        import_synapses_for_existing_skeleton.delay(project_id, 
+            -1,  skeleton_class_instance_id, xres, yres, zres, segment_id)
 
         if DEBUG: print('task: import_autoseg_skeleton_with_synapses done')
 
