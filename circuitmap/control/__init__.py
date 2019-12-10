@@ -57,39 +57,55 @@ def load_subgraph(cursor, start_segment_id, order = 0):
             post_links = get_links(cursor, segment_id, where='segmentid_y')
 
             print('build graph ...')
+
+            print('pre_links', len(pre_links))
             for idx, r in pre_links.iterrows():
                 from_id = int(r['segmentid_x'])
                 to_id = int(r['segmentid_y'])
-                if (from_id,to_id) in g.edges:
-                    g.edges[(from_id,to_id)]['count'] += 1
+                if g.has_edge(from_id,to_id):
+                    ed = g.get_edge_data(from_id,to_id)
+                    ed['count'] += 1
                 else:
                     g.add_edge(from_id, to_id, count= 1)
 
+            print('post_links', len(post_links))
             for idx, r in post_links.iterrows():
                 from_id = int(r['segmentid_x'])
                 to_id = int(r['segmentid_y'])
-                if (from_id,to_id) in g.edges:
-                    g.edges[(from_id,to_id)]['count'] += 1
+                print('check')
+                if g.has_edge(from_id,to_id):
+                    print('already in')
+                    ed = g.get_edge_data(from_id,to_id)
+                    ed['count'] += 1
                 else:
+                    print('add edge')
                     g.add_edge(from_id, to_id, count= 1)
 
+            print('add segment_id', segment_id)
             fetched_segments.add(segment_id)
-                    
-            all_postsynaptic_segments = set(pre_links['segmentid_y'])
-            fetch_segments = fetch_segments.union(all_postsynaptic_segments)
             
-            all_presynaptic_segments = set(post_links['segmentid_x'])
-            fetch_segments = fetch_segments.union(all_presynaptic_segments)
+            print('merge segments post')
+            if len(pre_links) > 0:
+                all_postsynaptic_segments = set(pre_links['segmentid_y'])
+                fetch_segments = fetch_segments.union(all_postsynaptic_segments)
+            
+            print('merge segments pre')
+            if len(post_links) > 0:
+                all_presynaptic_segments = set(post_links['segmentid_x'])
+                fetch_segments = fetch_segments.union(all_presynaptic_segments)
         
         # remove all segments that were already fetched
+        print('find difference')
         fetch_segments = fetch_segments.difference(fetched_segments)
         
         # always remove 0
-        fetch_segments.remove(0)
+        if 0 in fetch_segments:
+            fetch_segments.remove(0)
 
+    print('return graph')
     return g
 
-def get_presynaptic_skeletons(g, synaptic_count_threshold = 0):
+def get_presynaptic_skeletons(g, segment_id, synaptic_count_threshold = 0):
     res = set()
     for nid in g.predecessors(segment_id):
         if nid == segment_id or nid == 0:
@@ -100,7 +116,7 @@ def get_presynaptic_skeletons(g, synaptic_count_threshold = 0):
     return list(res)
 
 
-def get_postsynaptic_skeletons(g, synaptic_count_threshold = 0):
+def get_postsynaptic_skeletons(g, segment_id, synaptic_count_threshold = 0):
     res = set()
     for nid in g.successors(segment_id):
         if nid == segment_id or nid == 0:
@@ -191,6 +207,7 @@ def fetch_synapses(request: HttpRequest, project_id=None):
             task = import_autoseg_skeleton_with_synapses.delay(pid, 
                 segment_id, xres, yres, zres)
 
+            print('call: import_upstream_downstream_partners')
             task  = import_upstream_downstream_partners.delay(segment_id, fetch_upstream, fetch_downstream,
                 pid, xres, yres, zres)
 
@@ -204,23 +221,30 @@ def fetch_synapses(request: HttpRequest, project_id=None):
 
 @task()
 def import_upstream_downstream_partners(segment_id, fetch_upstream, fetch_downstream, pid, xres, yres, zres):
-    # get all partners partners
-    conn = sqlite3.connect(SQLITE3_DB_PATH)
-    cur = conn.cursor()
+    try:
+        print('task: import_upstream_downstream_partners start', segment_id)
+        # get all partners partners
+        conn = sqlite3.connect(SQLITE3_DB_PATH)
+        cur = conn.cursor()
 
-    g = load_subgraph(cur, segment_id)
+        print('load subgraph')
+        g = load_subgraph(cur, segment_id)
 
-    if fetch_upstream:
-        for partner_segment_id in get_presynaptic_skeletons(g, synaptic_count_threshold = 0):
-            print('spawn task for presynaptic segment_id', partner_segment_id)
-            task = import_autoseg_skeleton_with_synapses.delay(pid, 
-                partner_segment_id, xres, yres, zres)
+        print('start fetching ...')
+        if fetch_upstream:
+            for partner_segment_id in get_presynaptic_skeletons(g, segment_id, synaptic_count_threshold = 10):
+                print('spawn task for presynaptic segment_id', partner_segment_id)
+                task = import_autoseg_skeleton_with_synapses.delay(pid, 
+                    partner_segment_id, xres, yres, zres)
 
-    if fetch_downstream:
-        for partner_segment_id in get_postsynaptic_skeletons(g, synaptic_count_threshold = 0):
-            print('spawn task for postsynaptic segment_id', partner_segment_id)
-            task = import_autoseg_skeleton_with_synapses.delay(pid, 
-                partner_segment_id, xres, yres, zres)
+        if fetch_downstream:
+            for partner_segment_id in get_postsynaptic_skeletons(g, segment_id, synaptic_count_threshold = 10):
+                print('spawn task for postsynaptic segment_id', partner_segment_id)
+                task = import_autoseg_skeleton_with_synapses.delay(pid, 
+                    partner_segment_id, xres, yres, zres)
+
+    except Exception as ex:
+        print('exception import_upstream_downstream_partners: ', ex)
 
 
 @task()
@@ -337,7 +361,7 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
         for connector_id, r in connectors.items():
             q = """
         INSERT INTO connector (id, user_id, editor_id, project_id, location_x, location_y, location_z)
-                    VALUES ({},{},{},{},{},{},{});
+                    VALUES ({},{},{},{},{},{},{}) ON CONFLICT (id) DO NOTHING;
                 """.format(
                 connector_id,
                 DEFAULT_IMPORT_USER,
@@ -363,7 +387,7 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
                 relation_id, 
                 skeleton_id,
                 confidence)
-                            VALUES ({},{},{},{},{},{},{});
+                            VALUES ({},{},{},{},{},{},{}) ON CONFLICT ON CONSTRAINT treenode_connector_project_id_uniq DO NOTHING;;
                 """.format(
                 DEFAULT_IMPORT_USER,
                 project_id,
