@@ -531,7 +531,7 @@ def import_autoseg_skeleton_with_synapses(project_id, segment_id, xres, yres, zr
             # insert treenodes
 
             queries = []
-            with_multi = True:
+            with_multi = True
             q = 'BEGIN;'
             if with_multi:
                 queries.append(q)
@@ -553,7 +553,6 @@ def import_autoseg_skeleton_with_synapses(project_id, segment_id, xres, yres, zr
                  DEFAULT_IMPORT_USER,
                  skeleton_class_instance_id,
                  n['r'])
-            if DEBUG: print(query)
             if with_multi:
                 queries.append(query)
             else:
@@ -575,7 +574,6 @@ def import_autoseg_skeleton_with_synapses(project_id, segment_id, xres, yres, zr
                      skeleton_class_instance_id,
                      n['r'],
                     parent_id)
-                if DEBUG: print(query)
                 if with_multi:
                     queries.append(query)
                 else:
