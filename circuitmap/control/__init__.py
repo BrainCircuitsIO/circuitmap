@@ -356,6 +356,14 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
         res = cursor.fetchall()
         relations = dict([(v,u) for u,v in res])
 
+        with_multi = True
+        queries = []
+        query = 'BEGIN;'
+        if with_multi:
+            queries.append(query)
+        else:
+            cursor.execute(query)
+
         # insert connectors
         if DEBUG: print('start inserting connectors')
         for connector_id, r in connectors.items():
@@ -370,8 +378,11 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
                 int(r['pre_x'] * xres), 
                 int(r['pre_y'] * yres),
                 int(r['pre_z'] * zres)) 
-                
-            cursor.execute(q)
+
+            if with_multi:
+                queries.append(q)
+            else:
+                cursor.execute(q)
 
         # insert links
         # TODO: optimize based on scores
@@ -397,7 +408,21 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
                 active_skeleton_id,
                 confidence_value)
 
+            if with_multi:
+                queries.append(q)
+            else:
+                cursor.execute(q)
+
+        q = 'COMMIT;'
+        if with_multi:
+            queries.append(q)
+        else:
             cursor.execute(q)
+
+        if with_multi:
+            if DEBUG: print('run multiquery')
+            cursor.execute('\n'.join(queries))
+
 
         if DEBUG: print('task: import_synapses_for_existing_skeleton started: done')
     except Exception as ex:
@@ -476,7 +501,6 @@ def import_autoseg_skeleton_with_synapses(project_id, segment_id, xres, yres, zr
             res = cursor.fetchall()
             classes = dict([(v,u) for u,v in res])
 
-            cursor.execute('BEGIN;')
             
             query = """
             INSERT INTO class_instance (user_id, project_id, class_id, name)
@@ -506,11 +530,19 @@ def import_autoseg_skeleton_with_synapses(project_id, segment_id, xres, yres, zr
 
             # insert treenodes
 
+            queries = []
+            with_multi = True:
+            q = 'BEGIN;'
+            if with_multi:
+                queries.append(q)
+            else:
+                cursor.execute(q)
+
             # insert root node
             parent_id = ""
             n = g2.node[root_skeleton_id]
             query = """INSERT INTO treenode (id, project_id, location_x, location_y, location_z, editor_id,
-                        user_id, skeleton_id, radius) VALUES ({},{},{},{},{},{},{},{},{});
+                        user_id, skeleton_id, radius) VALUES ({},{},{},{},{},{},{},{},{}) ON CONFLICT (id) DO NOTHING;
                 """.format(
                  root_skeleton_id,
                  project_id,
@@ -522,13 +554,16 @@ def import_autoseg_skeleton_with_synapses(project_id, segment_id, xres, yres, zr
                  skeleton_class_instance_id,
                  n['r'])
             if DEBUG: print(query)
-            cursor.execute(query)
+            if with_multi:
+                queries.append(query)
+            else:
+                cursor.execute(query)
 
             # insert all chidren
             for parent_id, skeleton_node_id in new_tree.edges(data=False):
                 n = g2.node[skeleton_node_id]
                 query = """INSERT INTO treenode (id,project_id, location_x, location_y, location_z, editor_id,
-                            user_id, skeleton_id, radius, parent_id) VALUES ({},{},{},{},{},{},{},{},{},{});
+                            user_id, skeleton_id, radius, parent_id) VALUES ({},{},{},{},{},{},{},{},{},{}) ON CONFLICT (id) DO NOTHING;
                     """.format(
                      skeleton_node_id,
                      project_id,
@@ -541,9 +576,20 @@ def import_autoseg_skeleton_with_synapses(project_id, segment_id, xres, yres, zr
                      n['r'],
                     parent_id)
                 if DEBUG: print(query)
+                if with_multi:
+                    queries.append(query)
+                else:
+                    cursor.execute(query)
+
+            query = 'COMMIT;'
+            if with_multi:
+                queries.append(query)
+            else:
                 cursor.execute(query)
 
-            cursor.execute('COMMIT;')
+            if DEBUG: print('run multiquery')
+            if with_multi:
+                cursor.execute('\n'.join(queries))
 
         # call import_synapses_for_existing_skeleton with autoseg skeleton as seed
         if DEBUG: print('call task: import_synapses_for_existing_skeleton')
