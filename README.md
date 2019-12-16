@@ -9,11 +9,10 @@ for integrating automatically generated synaptic link data and
 segmentations into CATMAID circuit mapping workflows.
 
 The synaptic link data for the [FAFB dataset](http://www.temca2data.org/)
-is based on the publication by [Buhmann et al. 2019](ADDREF). For interactive
-use of the data in a Jupyter notebook, please refer to 
-[this example in fafbseg-py](https://github.com/flyconnectome/fafbseg-py/examples).
+is based on the publication by [Buhmann et al. 2019](https://www.biorxiv.org/content/10.1101/2019.12.12.874172v1).
+The data and usage instructions are available in the [synful_fab repository](https://github.com/funkelab/synful_fafb).
 
-## Quick start for integration into CATMAID
+## Integration into CATMAID
 
 1. Install the dependencies with `pip install -r requirements.txt`.
 
@@ -28,8 +27,8 @@ circuitmap's static files.
 5. The extension needs to be enabled in the main CATMAID instance by
 updating the `KNOWN_EXTENSIONS` variable in `CATMAID/django/projects/pipelinefiles.py`.
 
-6. The available synaptic link data needs to be ingested into the generated
-Postgres table `circuitmap_synlinks`.
+1. The synaptic link data needs to be ingested into the generated
+Postgres table `circuitmap_synlinks` from the [SQLite database dump](https://github.com/funkelab/synful_fafb).
 
 7. A few additional settings have to be configured to interoperate with segmentation
 data and CATMAID import procedure (see `circuitmap/control/settings.py.example`).

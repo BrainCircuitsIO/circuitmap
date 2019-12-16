@@ -1,6 +1,3 @@
 cloud-volume
 pandas
 git+git://github.com/flyconnectome/fafbseg-py.git
-pymaid
-redis
-
