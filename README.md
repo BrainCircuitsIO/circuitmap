@@ -1,16 +1,13 @@
 # Circuit Map
 
-Circuit Map is a Django application which acts as a drop-in
-extension for [CATMAID](https://catmaid.readthedocs.io/en/latest/extensions.html)
-or can be run as an independent Django app.
+Circuit Map is a Django application which can act as a drop-in
+extension for [CATMAID](https://catmaid.readthedocs.io/en/latest/extensions.html).
 
-Circuit Map exposes a widget in CATMAID with associated endpoints and data models
-for integrating automatically generated synaptic link data and
-segmentations into CATMAID circuit mapping workflows.
+Circuit Map provides tooling to integrate remote skeletons derived from automated segmentations
+and automatically generated synaptic link data into CATMAID circuit mapping workflows.
 
-The synaptic link data for the [FAFB dataset](http://www.temca2data.org/)
-is based on the publication by [Buhmann et al. 2019](https://www.biorxiv.org/content/10.1101/2019.12.12.874172v1).
-The data and usage instructions are available in the [synful_fab repository](https://github.com/funkelab/synful_fafb).
+An example use of the tool is based on automatically generated synaptic link data by [Buhmann et al. 2019](https://www.biorxiv.org/content/10.1101/2019.12.12.874172v1) for the [FAFB dataset](http://www.temca2data.org/). Synaptic link data can be added to manually reconstructed skeletons or automatically generated skeletons derived from a [whole brain segmentation](https://fafb-ffn1.storage.googleapis.com/landing.html). Up- and downstream skeleton partners derived from this synaptic link data can be imported automatically into the current CATMAID project.
+
 
 ## Integration into CATMAID
 
@@ -19,16 +16,13 @@ The data and usage instructions are available in the [synful_fab repository](htt
 2. Install circuitmap in whichever python environment is running
 CATMAID with `pip install -e .`
 
-3. Run `python manage.py migrate` to create the circuitmap models.
+3. Run `python manage.py migrate` (in the CATMAID folder) to create the circuitmap models.
 
-4. Run `python manage.py collectstatic -l` to pick up
+4. Run `python manage.py collectstatic -l`  (in the CATMAID folder) to pick up
 circuitmap's static files.
 
-5. The extension needs to be enabled in the main CATMAID instance by
-updating the `KNOWN_EXTENSIONS` variable in `CATMAID/django/projects/pipelinefiles.py`.
-
-1. The synaptic link data needs to be ingested into the generated
+5. The synaptic link data needs to be ingested into the generated
 Postgres table `circuitmap_synlinks` from the [SQLite database dump](https://github.com/funkelab/synful_fafb).
 
-7. A few additional settings have to be configured to interoperate with segmentation
+6. A few additional settings have to be configured to interoperate with segmentation
 data and CATMAID import procedure (see `circuitmap/control/settings.py.example`).

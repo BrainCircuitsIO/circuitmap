@@ -45,20 +45,20 @@ def load_subgraph(cursor, start_segment_id, order = 0):
     g = nx.DiGraph()
         
     for ordern in range(order+1):
-        print('order', ordern, 'need to fetch', len(fetch_segments), 'segments')
+        if DEBUG: print('order', ordern, 'need to fetch', len(fetch_segments), 'segments')
         for i, segment_id in enumerate(list(fetch_segments)):
             
-            print('process segment', i, 'with segment_id', segment_id)
+            if DEBUG: print('process segment', i, 'with segment_id', segment_id)
 
-            print('retrieve pre_links')
+            if DEBUG: print('retrieve pre_links')
             pre_links = get_links(cursor, segment_id, where='segmentid_x')
 
-            print('retrieve post_links')
+            if DEBUG: print('retrieve post_links')
             post_links = get_links(cursor, segment_id, where='segmentid_y')
 
-            print('build graph ...')
+            if DEBUG: print('build graph ...')
 
-            print('pre_links', len(pre_links))
+            if DEBUG: print('number of pre_links', len(pre_links))
             for idx, r in pre_links.iterrows():
                 from_id = int(r['segmentid_x'])
                 to_id = int(r['segmentid_y'])
@@ -68,41 +68,33 @@ def load_subgraph(cursor, start_segment_id, order = 0):
                 else:
                     g.add_edge(from_id, to_id, count= 1)
 
-            print('post_links', len(post_links))
+            if DEBUG: print('number of post_links', len(post_links))
             for idx, r in post_links.iterrows():
                 from_id = int(r['segmentid_x'])
                 to_id = int(r['segmentid_y'])
-                print('check')
                 if g.has_edge(from_id,to_id):
-                    print('already in')
                     ed = g.get_edge_data(from_id,to_id)
                     ed['count'] += 1
                 else:
-                    print('add edge')
                     g.add_edge(from_id, to_id, count= 1)
 
-            print('add segment_id', segment_id)
             fetched_segments.add(segment_id)
             
-            print('merge segments post')
             if len(pre_links) > 0:
                 all_postsynaptic_segments = set(pre_links['segmentid_y'])
                 fetch_segments = fetch_segments.union(all_postsynaptic_segments)
             
-            print('merge segments pre')
             if len(post_links) > 0:
                 all_presynaptic_segments = set(post_links['segmentid_x'])
                 fetch_segments = fetch_segments.union(all_presynaptic_segments)
         
         # remove all segments that were already fetched
-        print('find difference')
         fetch_segments = fetch_segments.difference(fetched_segments)
         
         # always remove 0
         if 0 in fetch_segments:
             fetch_segments.remove(0)
 
-    print('return graph')
     return g
 
 def get_presynaptic_skeletons(g, segment_id, synaptic_count_threshold = 0):
@@ -141,10 +133,10 @@ def get_synapses(request, segment_id):
     conn = sqlite3.connect(SQLITE3_DB_PATH)
     cur = conn.cursor()
 
-    print('retrieve pre_links')
+    if DEBUG: print('retrieve pre_links')
     pre_links = get_links(cursor, segment_id, where='segmentid_x')
 
-    print('retrieve post_links')
+    if DEBUG: print('retrieve post_links')
     post_links = get_links(cursor, segment_id, where='segmentid_y')
 
     return JsonResponse({'pre_links': pre_links.to_json(), 'post_links': post_links.to_json()})
@@ -183,6 +175,8 @@ def fetch_synapses(request: HttpRequest, project_id=None):
     fetch_downstream = bool(request.POST.get('fetch_downstream', False ))
     distance_threshold = int(request.POST.get('distance_threshold', 1000 ))
     active_skeleton_id = int(request.POST.get('active_skeleton', -1 ))
+    upstream_syn_count = int(request.POST.get('upstream_syn_count', 5 ))
+    downstream_syn_count = int(request.POST.get('downstream_syn_count', 5 ))
 
     pid = int(project_id)
 
@@ -195,7 +189,7 @@ def fetch_synapses(request: HttpRequest, project_id=None):
         try:
             segment_id = int(cv[x//2,y//2,z,0][0][0][0][0])
         except Exception as ex:
-            print('Exception occurred: {}'.format(ex))
+            if DEBUG: print('Exception occurred: {}'.format(ex))
             segment_id = None
             return JsonResponse({'project_id': pid, 'msg': 'No segment found at this location.', 'ex': ex})
 
@@ -207,9 +201,9 @@ def fetch_synapses(request: HttpRequest, project_id=None):
             task = import_autoseg_skeleton_with_synapses.delay(pid, 
                 segment_id, xres, yres, zres)
 
-            print('call: import_upstream_downstream_partners')
+            if DEBUG: print('call: import_upstream_downstream_partners')
             task  = import_upstream_downstream_partners.delay(segment_id, fetch_upstream, fetch_downstream,
-                pid, xres, yres, zres)
+                pid, xres, yres, zres, upstream_syn_count, downstream_syn_count)
 
             return JsonResponse({'project_id': pid, 'segment_id': str(segment_id)})
 
@@ -217,29 +211,32 @@ def fetch_synapses(request: HttpRequest, project_id=None):
         # fetch synapses for manual skeleton
         task = import_synapses_for_existing_skeleton.delay(pid, 
             distance_threshold, active_skeleton_id, xres, yres, zres)
+        
         return JsonResponse({'project_id': pid})
 
 @task()
-def import_upstream_downstream_partners(segment_id, fetch_upstream, fetch_downstream, pid, xres, yres, zres):
+def import_upstream_downstream_partners(segment_id, fetch_upstream, fetch_downstream, 
+	pid, xres, yres, zres, upstream_syn_count, downstream_syn_count):
     try:
         print('task: import_upstream_downstream_partners start', segment_id)
+
         # get all partners partners
         conn = sqlite3.connect(SQLITE3_DB_PATH)
         cur = conn.cursor()
 
-        print('load subgraph')
+        if DEBUG: print('load subgraph')
         g = load_subgraph(cur, segment_id)
 
-        print('start fetching ...')
+        if DEBUG: print('start fetching ...')
         if fetch_upstream:
-            for partner_segment_id in get_presynaptic_skeletons(g, segment_id, synaptic_count_threshold = 10):
-                print('spawn task for presynaptic segment_id', partner_segment_id)
+            for partner_segment_id in get_presynaptic_skeletons(g, segment_id, synaptic_count_threshold = upstream_syn_count):
+                if DEBUG: print('spawn task for presynaptic segment_id', partner_segment_id)
                 task = import_autoseg_skeleton_with_synapses.delay(pid, 
                     partner_segment_id, xres, yres, zres)
 
         if fetch_downstream:
-            for partner_segment_id in get_postsynaptic_skeletons(g, segment_id, synaptic_count_threshold = 10):
-                print('spawn task for postsynaptic segment_id', partner_segment_id)
+            for partner_segment_id in get_postsynaptic_skeletons(g, segment_id, synaptic_count_threshold = downstream_syn_count):
+                if DEBUG: print('spawn task for postsynaptic segment_id', partner_segment_id)
                 task = import_autoseg_skeleton_with_synapses.delay(pid, 
                     partner_segment_id, xres, yres, zres)
 
