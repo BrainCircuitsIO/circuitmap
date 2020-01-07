@@ -167,10 +167,6 @@ def fetch_synapses(request: HttpRequest, project_id=None):
     y = int(round(float(request.POST.get('y', -1))))
     z = int(round(float(request.POST.get('z', -1))))
 
-    xres = int(request.POST.get('xres', 1))
-    yres = int(request.POST.get('yres', 1))
-    zres = int(request.POST.get('zres', 1))
-
     fetch_upstream = bool(request.POST.get('fetch_upstream', False ))
     fetch_downstream = bool(request.POST.get('fetch_downstream', False ))
     distance_threshold = int(request.POST.get('distance_threshold', 1000 ))
@@ -199,24 +195,24 @@ def fetch_synapses(request: HttpRequest, project_id=None):
             if DEBUG: print('spawn task: import_autoseg_skeleton_with_synapses')
 
             task = import_autoseg_skeleton_with_synapses.delay(pid, 
-                segment_id, xres, yres, zres)
+                segment_id)
 
             if DEBUG: print('call: import_upstream_downstream_partners')
             task  = import_upstream_downstream_partners.delay(segment_id, fetch_upstream, fetch_downstream,
-                pid, xres, yres, zres, upstream_syn_count, downstream_syn_count)
+                pid, upstream_syn_count, downstream_syn_count)
 
             return JsonResponse({'project_id': pid, 'segment_id': str(segment_id)})
 
     else:
         # fetch synapses for manual skeleton
         task = import_synapses_for_existing_skeleton.delay(pid, 
-            distance_threshold, active_skeleton_id, xres, yres, zres)
+            distance_threshold, active_skeleton_id)
         
         return JsonResponse({'project_id': pid})
 
 @task()
 def import_upstream_downstream_partners(segment_id, fetch_upstream, fetch_downstream, 
-	pid, xres, yres, zres, upstream_syn_count, downstream_syn_count):
+	pid, upstream_syn_count, downstream_syn_count):
     try:
         print('task: import_upstream_downstream_partners start', segment_id)
 
@@ -232,13 +228,13 @@ def import_upstream_downstream_partners(segment_id, fetch_upstream, fetch_downst
             for partner_segment_id in get_presynaptic_skeletons(g, segment_id, synaptic_count_threshold = upstream_syn_count):
                 if DEBUG: print('spawn task for presynaptic segment_id', partner_segment_id)
                 task = import_autoseg_skeleton_with_synapses.delay(pid, 
-                    partner_segment_id, xres, yres, zres)
+                    partner_segment_id)
 
         if fetch_downstream:
             for partner_segment_id in get_postsynaptic_skeletons(g, segment_id, synaptic_count_threshold = downstream_syn_count):
                 if DEBUG: print('spawn task for postsynaptic segment_id', partner_segment_id)
                 task = import_autoseg_skeleton_with_synapses.delay(pid, 
-                    partner_segment_id, xres, yres, zres)
+                    partner_segment_id)
 
     except Exception as ex:
         print('exception import_upstream_downstream_partners: ', ex)
@@ -246,7 +242,7 @@ def import_upstream_downstream_partners(segment_id, fetch_upstream, fetch_downst
 
 @task()
 def import_synapses_for_existing_skeleton(project_id, distance_threshold, active_skeleton_id,
-    xres, yres, zres, autoseg_segment_id = None):
+    autoseg_segment_id = None):
     
     if DEBUG: print('task: import_synapses_for_existing_skeleton started')
 
@@ -311,8 +307,7 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
 
         if len(all_pre_links_concat) > 0:
             if DEBUG: print('find closest distances to skeleton for pre')
-            res = tree.query(all_pre_links_concat[['pre_x','pre_y', 'pre_z']] * \
-                np.array([xres,yres,zres]))
+            res = tree.query(all_pre_links_concat[['pre_x','pre_y', 'pre_z']])
             all_pre_links_concat['dist'] = res[0]
             all_pre_links_concat['skeleton_node_id_index'] = res[1]
             for idx, r in all_pre_links_concat.iterrows():
@@ -332,8 +327,7 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
 
         if len(all_post_links_concat) > 0:
             if DEBUG: print('find closest distances to skeleton for post')
-            res = tree.query(all_post_links_concat[['post_x','post_y', 'post_z']] * \
-                np.array([xres,yres,zres]))
+            res = tree.query(all_post_links_concat[['post_x','post_y', 'post_z']])
             all_post_links_concat['dist'] = res[0]
             all_post_links_concat['skeleton_node_id_index'] = res[1]
                 
@@ -377,9 +371,9 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
                 DEFAULT_IMPORT_USER,
                 DEFAULT_IMPORT_USER,
                 project_id,
-                int(r['pre_x'] * xres), 
-                int(r['pre_y'] * yres),
-                int(r['pre_z'] * zres)) 
+                int(r['pre_x']), 
+                int(r['pre_y']),
+                int(r['pre_z'])) 
 
             if with_multi:
                 queries.append(q)
@@ -432,7 +426,7 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
 
 
 @task
-def import_autoseg_skeleton_with_synapses(project_id, segment_id, xres, yres, zres):
+def import_autoseg_skeleton_with_synapses(project_id, segment_id):
 
     try:
         # ID handling: method globally unique ID
@@ -595,7 +589,7 @@ def import_autoseg_skeleton_with_synapses(project_id, segment_id, xres, yres, zr
         if DEBUG: print('call task: import_synapses_for_existing_skeleton')
 
         import_synapses_for_existing_skeleton(project_id, 
-            -1,  skeleton_class_instance_id, xres, yres, zres, segment_id)
+            -1,  skeleton_class_instance_id, segment_id)
 
         if DEBUG: print('task: import_autoseg_skeleton_with_synapses done')
 
