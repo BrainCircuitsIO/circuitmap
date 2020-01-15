@@ -24,9 +24,9 @@ cv.skeleton.meta.refresh_info()
 cv.skeleton = ShardedPrecomputedSkeletonSource(cv.skeleton.meta, cv.cache, cv.config)
 
 
-def get_links(cursor, segment_id, where='segmentid_x', table='synlinks'):
+def get_links(cursor, segment_id, where='segmentid_pre', table='synlinks'):
     cols = ['offset', 'pre_x', 'pre_y', 'pre_z', 'post_x', 'post_y', 
-            'post_z', 'scores', 'cleft_scores', 'segmentid_x', 'segmentid_y']
+            'post_z', 'scores', 'cleft_scores', 'segmentid_pre', 'segmentid_post']
     cursor.execute('SELECT * from {} where {} = {};'.format(table, where, segment_id))
     pre_links = cursor.fetchall()
     return pd.DataFrame.from_records(pre_links, columns=cols)
@@ -51,17 +51,17 @@ def load_subgraph(cursor, start_segment_id, order = 0):
             if DEBUG: print('process segment', i, 'with segment_id', segment_id)
 
             if DEBUG: print('retrieve pre_links')
-            pre_links = get_links(cursor, segment_id, where='segmentid_x')
+            pre_links = get_links(cursor, segment_id, where='segmentid_pre')
 
             if DEBUG: print('retrieve post_links')
-            post_links = get_links(cursor, segment_id, where='segmentid_y')
+            post_links = get_links(cursor, segment_id, where='segmentid_post')
 
             if DEBUG: print('build graph ...')
 
             if DEBUG: print('number of pre_links', len(pre_links))
             for idx, r in pre_links.iterrows():
-                from_id = int(r['segmentid_x'])
-                to_id = int(r['segmentid_y'])
+                from_id = int(r['segmentid_pre'])
+                to_id = int(r['segmentid_post'])
                 if g.has_edge(from_id,to_id):
                     ed = g.get_edge_data(from_id,to_id)
                     ed['count'] += 1
@@ -70,8 +70,8 @@ def load_subgraph(cursor, start_segment_id, order = 0):
 
             if DEBUG: print('number of post_links', len(post_links))
             for idx, r in post_links.iterrows():
-                from_id = int(r['segmentid_x'])
-                to_id = int(r['segmentid_y'])
+                from_id = int(r['segmentid_pre'])
+                to_id = int(r['segmentid_post'])
                 if g.has_edge(from_id,to_id):
                     ed = g.get_edge_data(from_id,to_id)
                     ed['count'] += 1
@@ -81,11 +81,11 @@ def load_subgraph(cursor, start_segment_id, order = 0):
             fetched_segments.add(segment_id)
             
             if len(pre_links) > 0:
-                all_postsynaptic_segments = set(pre_links['segmentid_y'])
+                all_postsynaptic_segments = set(pre_links['segmentid_post'])
                 fetch_segments = fetch_segments.union(all_postsynaptic_segments)
             
             if len(post_links) > 0:
-                all_presynaptic_segments = set(post_links['segmentid_x'])
+                all_presynaptic_segments = set(post_links['segmentid_pre'])
                 fetch_segments = fetch_segments.union(all_presynaptic_segments)
         
         # remove all segments that were already fetched
@@ -134,10 +134,10 @@ def get_synapses(request, segment_id):
     cur = conn.cursor()
 
     if DEBUG: print('retrieve pre_links')
-    pre_links = get_links(cursor, segment_id, where='segmentid_x')
+    pre_links = get_links(cursor, segment_id, where='segmentid_pre')
 
     if DEBUG: print('retrieve post_links')
-    post_links = get_links(cursor, segment_id, where='segmentid_y')
+    post_links = get_links(cursor, segment_id, where='segmentid_post')
 
     return JsonResponse({'pre_links': pre_links.to_json(), 'post_links': post_links.to_json()})
 
@@ -295,8 +295,8 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
         # retrieve synaptic links for each autoseg skeleton
         for segment_id in list(overlapping_segmentids):
             if DEBUG: print('process segment: ', segment_id)
-            all_pre_links.append(get_links(cur, segment_id, 'segmentid_x'))
-            all_post_links.append(get_links(cur, segment_id, 'segmentid_y'))
+            all_pre_links.append(get_links(cur, segment_id, 'segmentid_pre'))
+            all_post_links.append(get_links(cur, segment_id, 'segmentid_post'))
             
         all_pre_links_concat = pd.concat(all_pre_links)
         all_post_links_concat = pd.concat(all_post_links)
@@ -314,7 +314,7 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
                 # skip link if beyond distance threshold
                 if distance_threshold >= 0 and r['dist'] > distance_threshold:
                     continue
-                if r['segmentid_x'] == r['segmentid_y']:
+                if r['segmentid_pre'] == r['segmentid_post']:
                     # skip selflinks
                     continue
                 connector_id = CONNECTORID_OFFSET + int(r['offset']) * 10 
@@ -335,7 +335,7 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
                 # skip link if beyond distance threshold
                 if distance_threshold >= 0 and r['dist'] > distance_threshold:
                     continue
-                if r['segmentid_x'] == r['segmentid_y']:
+                if r['segmentid_pre'] == r['segmentid_post']:
                     # skip selflinks
                     continue
                 connector_id = CONNECTORID_OFFSET + int(r['offset']) * 10 
