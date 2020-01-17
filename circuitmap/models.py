@@ -23,5 +23,5 @@ class Synlinks(models.Model):
 	prob_sum = models.IntegerField()
 	prob_mean = models.IntegerField()
 	prob_count = models.IntegerField()
-	cleft_id = models.BigIntegerField()
+	cleft_id = models.BigIntegerField(default=0)
 	clust_con_offset = models.IntegerField()
