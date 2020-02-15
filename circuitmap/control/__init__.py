@@ -18,17 +18,32 @@ from celery.task import task
 
 from .settings import *
 
-cv = CloudVolume(CLOUDVOLUME_URL_REMOTE, use_https=True, parallel=False)
+cv = CloudVolume(CLOUDVOLUME_URL, use_https=True, parallel=False)
 cv.meta.info['skeletons'] = CLOUDVOLUME_SKELETONS
 cv.skeleton.meta.refresh_info()
 cv.skeleton = ShardedPrecomputedSkeletonSource(cv.skeleton.meta, cv.cache, cv.config)
 
+cols = ["id", "pre_x","pre_y","pre_z","post_x","post_y","post_z","scores",
+            "cleft_id","cleft_scores","clust_con_offset","dist","offset",
+            "prob_count","prob_max","prob_mean","prob_min","prob_sum",
+            "segmentid_post","segmentid_pre"]
 
-def get_links(cursor, segment_id, where='segmentid_pre', table='synlinks'):
-    cols = ['offset', 'pre_x', 'pre_y', 'pre_z', 'post_x', 'post_y', 
-            'post_z', 'scores', 'cleft_scores', 'segmentid_pre', 'segmentid_post']
+
+def get_links(cursor, segment_id, where='segmentid_pre', table='circuitmap_synlinks'):
+    #print('execute')
     cursor.execute('SELECT * from {} where {} = {};'.format(table, where, segment_id))
+    #print('fetch all')
     pre_links = cursor.fetchall()
+    #print('fetch from db done')
+    return pd.DataFrame.from_records(pre_links, columns=cols)
+
+
+def get_links_from_offset(cursor, offsets, table='circuitmap_synlinks'):
+    #print('execute')
+    cursor.execute('SELECT * from {} where "offset" in ({});'.format(table, ','.join(map(str,offsets))))
+    #print('fetch all')
+    pre_links = cursor.fetchall()
+    #print('fetch from db done')
     return pd.DataFrame.from_records(pre_links, columns=cols)
 
 
@@ -121,8 +136,8 @@ def get_postsynaptic_skeletons(g, segment_id, synaptic_count_threshold = 0):
 
 @api_view(['GET'])
 def get_neighbors_graph(request, segment_id):    
-    conn = sqlite3.connect(SQLITE3_DB_PATH)
-    cur = conn.cursor()
+    #conn = sqlite3.connect(SQLITE3_DB_PATH)
+    cur = connection.cursor()
     g = load_subgraph(cur, segment_id, order = 0)
     from networkx.readwrite import json_graph
     return JsonResponse({'graph': json_graph.node_link_data(g)})
@@ -130,8 +145,8 @@ def get_neighbors_graph(request, segment_id):
 
 @api_view(['GET'])
 def get_synapses(request, segment_id):    
-    conn = sqlite3.connect(SQLITE3_DB_PATH)
-    cur = conn.cursor()
+    #conn = sqlite3.connect(SQLITE3_DB_PATH)
+    cur = connection.cursor()
 
     if DEBUG: print('retrieve pre_links')
     pre_links = get_links(cursor, segment_id, where='segmentid_pre')
@@ -217,8 +232,8 @@ def import_upstream_downstream_partners(segment_id, fetch_upstream, fetch_downst
         print('task: import_upstream_downstream_partners start', segment_id)
 
         # get all partners partners
-        conn = sqlite3.connect(SQLITE3_DB_PATH)
-        cur = conn.cursor()
+        #conn = sqlite3.connect(SQLITE3_DB_PATH)
+        cur = connection.cursor()
 
         if DEBUG: print('load subgraph')
         g = load_subgraph(cur, segment_id)
@@ -287,10 +302,7 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
         all_pre_links = []
         all_post_links = []
 
-        # TODO: use local SQlite DB for now. later ingest data into 
-        # circuitmap managed table (i.e circuit_synlinks)
-        conn = sqlite3.connect(SQLITE3_DB_PATH)
-        cur = conn.cursor()
+        cur = connection.cursor()
 
         # retrieve synaptic links for each autoseg skeleton
         for segment_id in list(overlapping_segmentids):
@@ -305,46 +317,87 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
             print('total nr prelinks collected', len(all_pre_links_concat))
             print('total nr postlinks collected', len(all_post_links_concat))
 
+        # for all pre/post links, if clust_con_offset > 0, retrieve the respective
+        # links and use the presynaptic location as representative location for the link
+        tmp_list = all_pre_links_concat[all_pre_links_concat['clust_con_offset']>0]['clust_con_offset'].tolist()
+        if len(tmp_list) == 0:
+            all_pre_links_concat_remap_connector = None
+        else:
+            all_pre_links_concat_remap_connector = get_links_from_offset(cursor, tmp_list)
+            all_pre_links_concat_remap_connector = all_pre_links_concat_remap_connector.set_index('offset')
+            if DEBUG: print('total nr representative prelinks collected', len(all_pre_links_concat_remap_connector))
+
+        tmp_list = all_post_links_concat[all_post_links_concat['clust_con_offset']>0]['clust_con_offset'].tolist()
+        if len(tmp_list) == 0:
+            all_post_links_concat_remap_connector = None
+        else:
+            all_post_links_concat_remap_connector = get_links_from_offset(cursor, tmp_list)
+            all_post_links_concat_remap_connector = all_post_links_concat_remap_connector.set_index('offset')
+            if DEBUG: print('total nr representative postlinks collected', len(all_post_links_concat_remap_connector))
+          
         if len(all_pre_links_concat) > 0:
             if DEBUG: print('find closest distances to skeleton for pre')
             res = tree.query(all_pre_links_concat[['pre_x','pre_y', 'pre_z']])
-            all_pre_links_concat['dist'] = res[0]
+            all_pre_links_concat['dist2'] = res[0]
             all_pre_links_concat['skeleton_node_id_index'] = res[1]
+            
             for idx, r in all_pre_links_concat.iterrows():
                 # skip link if beyond distance threshold
-                if distance_threshold >= 0 and r['dist'] > distance_threshold:
+                if distance_threshold >= 0 and r['dist2'] > distance_threshold:
                     continue
                 if r['segmentid_pre'] == r['segmentid_post']:
                     # skip selflinks
                     continue
-                connector_id = CONNECTORID_OFFSET + int(r['offset']) * 10 
-                if not connector_id in connectors:
-                    connectors[connector_id] = r.to_dict()
+
+                skid = int(skeleton.loc[r['skeleton_node_id_index']]['id'])
+
+                # if representative presynaptic location found, use it
+                if r['clust_con_offset'] > 0 and not all_pre_links_concat_remap_connector is None:
+                    l = all_pre_links_concat_remap_connector.loc[r['clust_con_offset']]
+                    connector_id = CONNECTORID_OFFSET + int(r['clust_con_offset']) * 10 
+                    if DEBUG: print('found representative connector (prelink) {} for skid {}'.format(connector_id, skid))
+                    if not connector_id in connectors:
+                        connectors[connector_id] = l.to_dict()
+                else:
+                    # otherwise, use presynaptic location of link instead
+                    connector_id = CONNECTORID_OFFSET + int(r['offset']) * 10 
+                    if not connector_id in connectors:
+                        connectors[connector_id] = r.to_dict()
+
                 # add treenode_connector link
                 treenode_connector[ \
-                    (int(skeleton.loc[r['skeleton_node_id_index']]['id']), \
-                     connector_id)] = {'type': 'presynaptic_to'}
+                    (skid, connector_id)] = {'type': 'presynaptic_to'}
 
         if len(all_post_links_concat) > 0:
             if DEBUG: print('find closest distances to skeleton for post')
             res = tree.query(all_post_links_concat[['post_x','post_y', 'post_z']])
-            all_post_links_concat['dist'] = res[0]
+            all_post_links_concat['dist2'] = res[0]
             all_post_links_concat['skeleton_node_id_index'] = res[1]
                 
             for idx, r in all_post_links_concat.iterrows():
                 # skip link if beyond distance threshold
-                if distance_threshold >= 0 and r['dist'] > distance_threshold:
+                if distance_threshold >= 0 and r['dist2'] > distance_threshold:
                     continue
                 if r['segmentid_pre'] == r['segmentid_post']:
                     # skip selflinks
                     continue
-                connector_id = CONNECTORID_OFFSET + int(r['offset']) * 10 
-                if not connector_id in connectors:
-                    connectors[connector_id] = r.to_dict()
+
+                skid = int(skeleton.loc[r['skeleton_node_id_index']]['id'])
+
+                # if representative presynaptic location found, use it
+                if r['clust_con_offset'] > 0 and not all_post_links_concat_remap_connector is None:
+                    l = all_post_links_concat_remap_connector.loc[r['clust_con_offset']]
+                    connector_id = CONNECTORID_OFFSET + int(r['clust_con_offset']) * 10 
+                    if DEBUG: print('found representative connector (postlink) {} for skid {}'.format(connector_id, skid))
+                    if not connector_id in connectors:
+                        connectors[connector_id] = l.to_dict()
+                else:
+                    connector_id = CONNECTORID_OFFSET + int(r['offset']) * 10 
+                    if not connector_id in connectors:
+                        connectors[connector_id] = r.to_dict()
                 # add treenode_connector link
                 treenode_connector[ \
-                    (int(skeleton.loc[r['skeleton_node_id_index']]['id']), \
-                     connector_id)] = {'type': 'postsynaptic_to'}
+                    (skid, connector_id)] = {'type': 'postsynaptic_to'}
 
         # insert into database
         if DEBUG: print('fetch relations')
@@ -416,8 +469,10 @@ def import_synapses_for_existing_skeleton(project_id, distance_threshold, active
             cursor.execute(q)
 
         if with_multi:
-            if DEBUG: print('run multiquery')
+            #if DEBUG: print('run multiquery. nr queries {}'.format(len(queries))
+            if DEBUG: print('run inserts')
             cursor.execute('\n'.join(queries))
+            if DEBUG: print('multiquery done')
 
 
         if DEBUG: print('task: import_synapses_for_existing_skeleton started: done')
@@ -443,6 +498,8 @@ def import_autoseg_skeleton_with_synapses(project_id, segment_id):
         cursor.execute('SELECT id, skeleton_id FROM treenode WHERE project_id = {} and id = {}'.format( \
             int(project_id), mapping_skel_nid(segment_id, 0, int(project_id))))
         res = cursor.fetchone()
+        if DEBUG: print('fetched', res)
+
         if not res is None:
             node_id, skeleton_class_instance_id = res
             if DEBUG: print('autoseg skeleton was previously imported. skip reimport. (current skeletonid is {})'.format(skeleton_class_instance_id))
@@ -450,13 +507,15 @@ def import_autoseg_skeleton_with_synapses(project_id, segment_id):
             # fetch and insert autoseg skeleton at location
             if DEBUG: print('fetch skeleton for segment_id {}'.format(segment_id))
             
-            cv = CloudVolume(CLOUDVOLUME_URL, use_https=False, parallel=False)
-            cv.meta.info['skeletons'] = CLOUDVOLUME_SKELETONS
-            cv.skeleton.meta.refresh_info()
-            cv.skeleton = ShardedPrecomputedSkeletonSource(cv.skeleton.meta, cv.cache, cv.config)
+            #cv = CloudVolume(CLOUDVOLUME_URL, use_https=False, parallel=False)
+            #cv.meta.info['skeletons'] = CLOUDVOLUME_SKELETONS
+            #cv.skeleton.meta.refresh_info()
+            #cv.skeleton = ShardedPrecomputedSkeletonSource(cv.skeleton.meta, cv.cache, cv.config)
 
             s1 = cv.skeleton.get(int(segment_id))
+            if DEBUG: print('fetched.')
             nr_of_vertices = len(s1.vertices)
+            if DEBUG: print('number of vertices {} for {}'.format(nr_of_vertices, segment_id))
 
             if DEBUG: print('autoseg skeleton for {} has {} nodes'.format(segment_id, nr_of_vertices))
             
