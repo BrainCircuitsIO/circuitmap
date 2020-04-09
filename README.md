@@ -22,7 +22,7 @@ CATMAID with `pip install -e .`
 circuitmap's static files.
 
 5. The synaptic link data needs to be ingested into the generated
-Postgres table `circuitmap_synlinks` from the [SQLite database dump](https://github.com/funkelab/synful_fafb).
+Postgres table `circuitmap_synlinks` from the [SQL database dump](https://github.com/funkelab/synful_fafb).
 
 6. A few additional settings have to be configured to interoperate with segmentation
 data and CATMAID import procedure (see `circuitmap/control/settings.py.example`).
